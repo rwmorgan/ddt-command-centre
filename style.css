@@ -321,6 +321,11 @@ th.sortable:hover { color: var(--accent); }
 .chip.chip-active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .chip.chip-clear { background: transparent; border-style: dashed; color: var(--muted); }
 
+/* ---------- favourite/pin star ---------- */
+.star-btn { color: var(--muted); background: transparent; border-color: transparent; }
+.star-btn:hover { color: var(--amber); background: var(--amber-soft); }
+.star-btn.is-favorite { color: var(--amber); }
+
 /* ---------- global search results dropdown ---------- */
 #appSearchResults {
   background: var(--surface); border: 1px solid var(--border-strong);

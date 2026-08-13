@@ -140,6 +140,7 @@ function loadState(){
     addMissingQuickLaunchEntries(merged, def);
     backfillQuickLaunchSchemes(merged, def);
     correctKnownBadSchemes(merged);
+    backfillFavorites(merged);
     if(merged.settings && merged.settings.term) delete merged.settings.term; // replaced by settings.terms (whole-year model)
     return merged;
   } catch(e){
@@ -181,6 +182,18 @@ function backfillQuickLaunchSchemes(state, defaults){
  * themselves. Add an entry here (old value → new value) whenever a shipped
  * default protocol turns out to be wrong, instead of relying on people to
  * notice and manually fix Settings themselves. */
+/** Sets the initial "pinned" relief contacts on a saved pool that predates
+ * the favourite field — only touches entries that have never had the field
+ * at all, so unpinning someone later always sticks (never re-forced back). */
+function backfillFavorites(state){
+  // The actual initial-favourites list lives in local-seed.js (real names
+  // don't belong in this published file) — nothing to backfill without it.
+  const initialFavorites = new Set((window.LOCAL_SEED && window.LOCAL_SEED.initialFavorites) || []);
+  if(!initialFavorites.size) return;
+  state.relief.externalPool.forEach(c => {
+    if(c.favorite === undefined) c.favorite = initialFavorites.has(c.name);
+  });
+}
 function correctKnownBadSchemes(state){
   const fixes = { "Outlook": { from: "ms-outlook://", to: "mailto:" } };
   state.quickLaunch.forEach(q => {
@@ -312,7 +325,11 @@ const ICONS = {
   message: `<path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>`,
   search: `<circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>`,
   spark: `<path d="M12 2l2.2 6.8L21 11l-6.8 2.2L12 20l-2.2-6.8L3 11l6.8-2.2z"/>`,
+  star: `<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>`,
 };
+function starIcon(filled){
+  return `<svg viewBox="0 0 24 24" fill="${filled ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mini-icon" style="width:15px;height:15px;">${ICONS.star}</svg>`;
+}
 function icon(name, extra=""){ return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="${extra}">${ICONS[name]||""}</svg>`; }
 
 /* ---------------------------------------------------------------------- */
@@ -532,6 +549,7 @@ let reliefEditingId = null;
 let reliefDirSort = { key: null, dir: 1 };   // Relief tab directory table sort
 let poolManageSort = { key: null, dir: 1 };  // Team & Files pool management table sort
 let reliefDirSubjectFilter = new Set();      // Relief tab directory subject-tag filter
+let reliefDirExpanded = false;               // Relief tab directory: show full list vs. pinned favourites only
 let poolManageSubjectFilter = new Set();     // Team & Files pool manager subject-tag filter
 
 /** Generic column sort: mutates rows in place by comparing string/number
@@ -852,8 +870,35 @@ function renderReliefPool(filter=""){
 
   if(!pool.length){ box.innerHTML = `<div class="empty-state">No matches. Try clearing the subject filter, or add contacts in Team &amp; Files.</div>`; return; }
 
+  // Only pin+collapse in the plain default view — any active search, sort,
+  // or subject filter means the person is actively looking for someone
+  // specific, so show every match instead of hiding results behind "more".
+  const isDefaultView = !f && !reliefDirSort.key && reliefDirSubjectFilter.size === 0;
+  const favCount = pool.filter(p => p.favorite).length;
+  let visiblePool = pool;
+  let hiddenCount = 0;
+  if(isDefaultView && favCount && !reliefDirExpanded){
+    visiblePool = pool.filter(p => p.favorite);
+    hiddenCount = pool.length - visiblePool.length;
+  }
+
+  const rowHtml = p => `<tr>
+      <td>
+        ${!p.isTeam ? `<button type="button" class="icon-btn star-btn ${p.favorite ? "is-favorite" : ""}" data-fav-toggle="${p.id}" title="${p.favorite ? "Unpin from top" : "Pin to top"}" style="width:22px;height:22px;padding:2px;vertical-align:-5px;">${starIcon(!!p.favorite)}</button>` : ""}
+        ${escapeHtml(p.firstName)}${p.isTeam ? ` <span class="badge badge-muted">Team</span>` : ""}
+      </td>
+      <td>${escapeHtml(p.lastName)}</td>
+      <td class="mono" style="white-space:nowrap;">${p.phone ? `<a href="${telHref(p.phone)}">${icon("phone","mini-icon")}${escapeHtml(p.phone)}</a>` : ""}${p.phone && p.email ? " · " : ""}${p.email ? `<a href="mailto:${escapeHtml(p.email)}">email</a>` : (!p.phone ? "—" : "")}</td>
+      <td class="hint">${escapeHtml(p.availability || "—")}</td>
+      <td class="hint">${escapeHtml(p.subjects || "—")}</td>
+      <td class="mono">${p.count}</td>
+      <td class="mono">${p.last ? fmtDateShort(p.last) : "—"}</td>
+      <td><button class="btn btn-sm" data-assign="${escapeHtml(p.name)}">Assign</button></td>
+    </tr>`;
+
   box.innerHTML = `
     ${reliefDirSort.key ? `<div class="hint" style="margin-bottom:6px;">Sorted by ${escapeHtml(reliefDirSort.key)} — <a href="#" id="reliefDirSortReset">reset to least-recently-used</a>.</div>` : ""}
+    ${isDefaultView && favCount ? `<div class="hint" style="margin-bottom:6px;">${icon("star","mini-icon")}Pinned contacts shown first — click the star on anyone to pin or unpin them.</div>` : ""}
     <div class="table-wrap"><table>
     <thead><tr>
       <th class="sortable" data-sort-key="firstName">First name${sortArrow(reliefDirSort,"firstName")}</th>
@@ -865,17 +910,11 @@ function renderReliefPool(filter=""){
       <th class="sortable" data-sort-key="last">Last used${sortArrow(reliefDirSort,"last")}</th>
       <th></th>
     </tr></thead>
-    <tbody>${pool.map(p => `<tr>
-      <td>${escapeHtml(p.firstName)}${p.isTeam ? ` <span class="badge badge-muted">Team</span>` : ""}</td>
-      <td>${escapeHtml(p.lastName)}</td>
-      <td class="mono" style="white-space:nowrap;">${p.phone ? `<a href="${telHref(p.phone)}">${icon("phone","mini-icon")}${escapeHtml(p.phone)}</a>` : ""}${p.phone && p.email ? " · " : ""}${p.email ? `<a href="mailto:${escapeHtml(p.email)}">email</a>` : (!p.phone ? "—" : "")}</td>
-      <td class="hint">${escapeHtml(p.availability || "—")}</td>
-      <td class="hint">${escapeHtml(p.subjects || "—")}</td>
-      <td class="mono">${p.count}</td>
-      <td class="mono">${p.last ? fmtDateShort(p.last) : "—"}</td>
-      <td><button class="btn btn-sm" data-assign="${escapeHtml(p.name)}">Assign</button></td>
-    </tr>`).join("")}</tbody>
-  </table></div>`;
+    <tbody>${visiblePool.map(rowHtml).join("")}</tbody>
+  </table></div>
+  ${hiddenCount > 0 ? `<div style="text-align:center; margin-top:10px;"><button class="btn btn-sm" id="reliefDirExpandBtn">Show ${hiddenCount} more ${icon("down","mini-icon")}</button></div>` : ""}
+  ${isDefaultView && reliefDirExpanded && favCount ? `<div style="text-align:center; margin-top:10px;"><button class="btn btn-sm" id="reliefDirCollapseBtn">Show pinned only</button></div>` : ""}
+  `;
 
   wireSortHeaders(box, reliefDirSort, () => renderReliefPool(document.getElementById("reliefDirSearch").value));
   const resetLink = document.getElementById("reliefDirSortReset");
@@ -883,6 +922,18 @@ function renderReliefPool(filter=""){
     e.preventDefault(); reliefDirSort = { key: null, dir: 1 };
     renderReliefPool(document.getElementById("reliefDirSearch").value);
   });
+  const expandBtn = document.getElementById("reliefDirExpandBtn");
+  if(expandBtn) expandBtn.addEventListener("click", () => { reliefDirExpanded = true; renderReliefPool(document.getElementById("reliefDirSearch").value); });
+  const collapseBtn = document.getElementById("reliefDirCollapseBtn");
+  if(collapseBtn) collapseBtn.addEventListener("click", () => { reliefDirExpanded = false; renderReliefPool(document.getElementById("reliefDirSearch").value); });
+
+  box.querySelectorAll("[data-fav-toggle]").forEach(b => b.addEventListener("click", () => {
+    const contact = state.relief.externalPool.find(x => x.id === b.dataset.favToggle);
+    if(!contact) return;
+    contact.favorite = !contact.favorite;
+    persist();
+    renderReliefPool(document.getElementById("reliefDirSearch").value);
+  }));
 
   box.querySelectorAll("[data-assign]").forEach(b => b.addEventListener("click", () => {
     const field = document.getElementById("rf-relief");
@@ -1586,7 +1637,10 @@ function renderTeamFiles(){
         <th></th>
       </tr></thead>
       <tbody>${rows.map(p => `<tr>
-        <td>${escapeHtml(p.firstName)}</td>
+        <td>
+          <button type="button" class="icon-btn star-btn ${p.favorite ? "is-favorite" : ""}" data-pool-fav-toggle="${p.id}" title="${p.favorite ? "Unpin from top of Relief directory" : "Pin to top of Relief directory"}" style="width:22px;height:22px;padding:2px;vertical-align:-5px;">${starIcon(!!p.favorite)}</button>
+          ${escapeHtml(p.firstName)}
+        </td>
         <td>${escapeHtml(p.lastName)}</td>
         <td class="mono" style="white-space:nowrap;">${escapeHtml(p.phone||"—")}${p.email ? `<br><span style="font-family:inherit;">${escapeHtml(p.email)}</span>` : ""}</td>
         <td class="hint">${escapeHtml(p.availability||"—")}</td>
@@ -1605,6 +1659,13 @@ function renderTeamFiles(){
       renderPoolManage(document.getElementById("poolManageSearch").value);
     });
 
+    box.querySelectorAll("[data-pool-fav-toggle]").forEach(b => b.addEventListener("click", () => {
+      const c = state.relief.externalPool.find(x => x.id === b.dataset.poolFavToggle);
+      if(!c) return;
+      c.favorite = !c.favorite;
+      persist();
+      renderPoolManage(document.getElementById("poolManageSearch").value);
+    }));
     box.querySelectorAll("[data-pool-edit]").forEach(b => b.addEventListener("click", () => openPoolModal(b.dataset.poolEdit)));
     box.querySelectorAll("[data-pool-del]").forEach(b => b.addEventListener("click", () => {
       const c = state.relief.externalPool.find(x => x.id === b.dataset.poolDel);
