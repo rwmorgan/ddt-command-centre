@@ -218,6 +218,9 @@ main { flex: 1; padding: 22px; max-width: 1280px; width: 100%; margin: 0 auto; }
 .session-line { font-weight: 600; }
 .session-line.sg { color: var(--amber); }
 .session-away { font-size: 11.5px; color: var(--flag); font-weight: 600; }
+.session-row-clickable { cursor: pointer; }
+.session-row-clickable:hover { background: var(--accent-soft); border-radius: var(--radius-sm); }
+.session-detail { padding: 4px 4px 10px; }
 
 /* ---------- quick launch ---------- */
 .qgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
@@ -317,6 +320,15 @@ th.sortable:hover { color: var(--accent); }
 .chip:hover { border-color: var(--accent); color: var(--accent); }
 .chip.chip-active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .chip.chip-clear { background: transparent; border-style: dashed; color: var(--muted); }
+
+/* ---------- global search results dropdown ---------- */
+#appSearchResults {
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); box-shadow: var(--shadow);
+  max-height: 320px; overflow-y: auto; padding: 6px;
+}
+#appSearchResults .item { cursor: pointer; }
+#appSearchResults .item:hover { border-color: var(--accent); background: var(--accent-soft); }
 tr:last-child td { border-bottom: none; }
 .table-wrap { overflow-x: auto; }
 

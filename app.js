@@ -36,17 +36,19 @@ function defaultState(){
   // gitignored and never published — see that file's header comment. On a
   // published copy (e.g. GitHub Pages) that file simply doesn't exist, so
   // LOCAL_SEED is undefined and the app starts with an empty team/pool.
-  const seed = window.LOCAL_SEED || { teacherNames: [], taNames: [], externalPool: [] };
+  const seed = window.LOCAL_SEED || { teacherNames: [], taNames: [], externalPool: [], classGrid: [], taGrid: [] };
   const teachers = seed.teacherNames.map(name => ({ id: uid(), name, role: "Teacher" }));
   const tas = seed.taNames.map(name => ({ id: uid(), name, role: "TA" }));
   const externalPool = seed.externalPool.map(c => ({ id: uid(), ...c }));
+  const classGrid = seed.classGrid || [];
+  const taGrid = seed.taGrid || [];
 
   return {
     version: 1,
     meta: {
       schoolName: "Rosny College",
       learningArea: "Design and Digital Technologies",
-      leaderName: "",
+      leaderName: seed.leaderName || "",
       createdAt: todayISO(),
       lastBackup: null,
     },
@@ -79,6 +81,11 @@ function defaultState(){
         thursday:  { kind: "standard",  lines: ["Line 5","Line 5","Line 4"] },
         friday:    { kind: "standard",  lines: ["Line 3","Line 1","Line 2"] },
       },
+      // Who's teaching/covering what, per day/session/line — from local-seed.js
+      // (see that file's comment for the session-index convention, which
+      // differs slightly on Wednesday because of the Support Group gap).
+      classGrid,
+      taGrid,
     },
     team: { teachers, tas },
     relief: {
@@ -365,7 +372,7 @@ function renderDashboard(){
     <div class="grid grid-2">
       <div class="card">
         <div class="card-head"><h2>${icon("clock")} Today's sessions</h2></div>
-        ${dayInfo ? renderSessionRows(dayInfo, times, today) : `<div class="empty-state">${icon("calendar")}<div>No timetabled sessions on weekends.</div></div>`}
+        ${dayInfo ? renderSessionRows(dayInfo, times, today, dayKey) : `<div class="empty-state">${icon("calendar")}<div>No timetabled sessions on weekends.</div></div>`}
       </div>
 
       <div class="grid" style="gap:16px;">
@@ -395,10 +402,14 @@ function renderDashboard(){
       </div>
       <div class="card">
         <div class="card-head"><h2>Quick launch</h2><button class="btn btn-sm" data-goto="settings">Edit links</button></div>
-        <form id="googleSearchForm" class="row" style="margin-bottom:12px;">
+        <form id="googleSearchForm" class="row" style="margin-bottom:8px;">
           <input type="search" id="googleSearchInput" placeholder="Search Google…" style="flex:1;">
           <button class="btn btn-sm" type="submit">${icon("search")} Search</button>
         </form>
+        <div class="field" style="position:relative;">
+          <input type="search" id="appSearchInput" placeholder="Search tasks, relief, meetings, team…">
+          <div id="appSearchResults" class="list" style="position:absolute; z-index:20; top:100%; left:0; right:0; margin-top:4px; display:none;"></div>
+        </div>
         <div class="qgrid" id="qgrid"></div>
       </div>
     </div>
@@ -413,6 +424,10 @@ function renderDashboard(){
     state.scratchpad = e.target.value; persist();
   });
   root.querySelectorAll("[data-goto]").forEach(b => b.addEventListener("click", () => showTab(b.dataset.goto)));
+  root.querySelectorAll("[data-session-toggle]").forEach(el => el.addEventListener("click", () => {
+    const panel = document.getElementById("sessionDetail" + el.dataset.sessionToggle);
+    if(panel) panel.style.display = panel.style.display === "none" ? "" : "none";
+  }));
   renderQuickLaunch();
 
   document.getElementById("googleSearchForm").addEventListener("submit", e => {
@@ -420,6 +435,22 @@ function renderDashboard(){
     const q = document.getElementById("googleSearchInput").value.trim();
     if(!q) return;
     window.open("https://www.google.com/search?q=" + encodeURIComponent(q), "_blank", "noopener");
+  });
+
+  const appSearchInput = document.getElementById("appSearchInput");
+  const appSearchResults = document.getElementById("appSearchResults");
+  appSearchInput.addEventListener("input", () => {
+    const results = globalSearch(appSearchInput.value);
+    if(!results.length){ appSearchResults.style.display = "none"; return; }
+    appSearchResults.style.display = "";
+    appSearchResults.innerHTML = results.map((r,i) => `
+      <div class="item" data-search-result="${i}">
+        <div class="item-main"><span class="badge badge-muted">${escapeHtml(r.type)}</span> ${escapeHtml(r.label)}</div>
+      </div>`).join("");
+    appSearchResults.querySelectorAll("[data-search-result]").forEach(el => el.addEventListener("click", () => {
+      showTab(results[+el.dataset.searchResult].tab);
+      appSearchInput.value = ""; appSearchResults.style.display = "none";
+    }));
   });
 }
 
@@ -442,17 +473,33 @@ function renderQuickLaunch(){
   }));
 }
 
-function renderSessionRows(dayInfo, times, dateISO){
+function renderSessionRows(dayInfo, times, dateISO, dayKey){
   return `<div>${times.map((t, i) => {
     const [label, start, end] = t;
     const line = dayInfo.lines[i] || "—";
     const isSG = /support group/i.test(line);
     const awayForThis = state.relief.log.filter(r => r.date === dateISO && (r.sessions||[]).includes(i));
-    return `<div class="session-row">
-      <div class="session-badge">${escapeHtml(label)}</div>
-      <div class="session-time mono">${escapeHtml(start)}–${escapeHtml(end)}</div>
-      <div class="session-line ${isSG ? "sg":""}">${escapeHtml(line)}</div>
-      <div>${awayForThis.length ? `<span class="session-away">${awayForThis.length} away</span>` : ""}</div>
+    const classes = classGridFor(dayKey, i);
+    const tas = taGridFor(dayKey, i);
+    return `<div>
+      <div class="session-row ${classes.length ? "session-row-clickable" : ""}" ${classes.length ? `data-session-toggle="${i}"` : ""}>
+        <div class="session-badge">${escapeHtml(label)}</div>
+        <div class="session-time mono">${escapeHtml(start)}–${escapeHtml(end)}</div>
+        <div class="session-line ${isSG ? "sg":""}">${escapeHtml(line)}</div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          ${awayForThis.length ? `<span class="session-away">${awayForThis.length} away</span>` : ""}
+          ${classes.length ? `<span class="badge badge-muted mono">${classes.length} classes ${icon("down","mini-icon")}</span>` : ""}
+        </div>
+      </div>
+      ${classes.length ? `<div class="session-detail" id="sessionDetail${i}" style="display:none;">
+        <div class="table-wrap"><table>
+          <thead><tr><th>Teacher</th><th>Subject</th><th>Room</th><th>TA covering</th></tr></thead>
+          <tbody>${classes.map(c => {
+            const ta = tas.find(x => x.line === c.line && (x.subject === c.subject || tas.length === 1));
+            return `<tr><td>${escapeHtml(c.teacher)}</td><td>${escapeHtml(c.subject)}</td><td class="mono">${escapeHtml(c.room||"—")}</td><td>${ta ? escapeHtml(ta.ta) : `<span class="hint">—</span>`}</td></tr>`;
+          }).join("")}</tbody>
+        </table></div>
+      </div>` : ""}
     </div>`;
   }).join("")}</div>`;
 }
@@ -613,6 +660,7 @@ function renderRelief(){
             <div id="rf-sessions" class="row" style="gap:14px;"></div>
             <div class="hint">Based on the rotation for the selected date.</div>
           </div>
+          <div id="rf-classes-panel"></div>
           <div class="row">
             <div class="field">
               <label for="rf-room">Room (optional)</label>
@@ -666,9 +714,17 @@ function renderRelief(){
     </div>
 
     <div class="card section-gap">
+      <div class="card-head"><h2>${icon("clock")} This term's relief stats</h2></div>
+      <div id="reliefStats"></div>
+    </div>
+
+    <div class="card section-gap">
       <div class="card-head">
         <h2>Relief log</h2>
-        <input type="search" id="reliefSearch" placeholder="Search log…" style="max-width:220px;">
+        <div class="row" style="gap:8px;">
+          <button class="btn btn-sm" id="printTodayBtn">${icon("print")} Print today's coverage</button>
+          <input type="search" id="reliefSearch" placeholder="Search log…" style="max-width:220px;">
+        </div>
       </div>
       <div id="reliefLog"></div>
     </div>
@@ -676,9 +732,13 @@ function renderRelief(){
     <div class="print-only" id="printSheet"></div>
   `;
 
+  document.getElementById("printTodayBtn").addEventListener("click", printTodaysCoverage);
+  renderReliefStats();
+
   const staffSel = document.getElementById("rf-staff");
   staffSel.addEventListener("change", () => {
     document.getElementById("rf-staff-other-wrap").style.display = staffSel.value === "__other" ? "" : "none";
+    renderClassesPanel();
   });
 
   const dateInput = document.getElementById("rf-date");
@@ -697,9 +757,43 @@ function renderRelief(){
       <label class="checkline"><input type="checkbox" class="rf-sess-cb" value="${i}"> ${escapeHtml(t[0])} · ${escapeHtml(dayInfo.lines[i])}</label>
     `).join("");
   }
-  dateInput.addEventListener("change", renderSessionCheckboxes);
+  /** Shows what the selected absent teacher actually teaches that day
+   * (subject + room), and who normally TAs each of those sessions —
+   * click a suggested TA to drop them straight into "Relief staff assigned". */
+  function renderClassesPanel(){
+    const panel = document.getElementById("rf-classes-panel");
+    const name = staffSel.value;
+    const dayKey = dayKeyFromISO(dateInput.value);
+    if(!name || name === "__other" || !dayKey){ panel.innerHTML = ""; return; }
+    const classes = classesForTeacherToday(name, dayKey);
+    if(!classes.length){ panel.innerHTML = ""; return; }
+    panel.innerHTML = `
+      <div class="card" style="background:var(--accent-soft); border-color:var(--accent); margin-bottom:14px;">
+        <h3 style="margin-bottom:8px;">${escapeHtml(name)}'s classes on ${escapeHtml(DAY_LABEL[dayKey])}</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Session</th><th>Subject</th><th>Room</th><th>Usual TA</th></tr></thead>
+          <tbody>${classes.map(c => {
+            const ta = taGridFor(dayKey, c.sessionIdx).find(t => t.line === c.line);
+            return `<tr>
+              <td class="mono">S${escapeHtml(c.sessionLabel)}</td>
+              <td>${escapeHtml(c.subject)}</td>
+              <td class="mono">${escapeHtml(c.room||"—")}</td>
+              <td>${ta ? `<button type="button" class="btn btn-sm" data-suggest-relief="${escapeHtml(ta.ta)}">${icon("plus")} ${escapeHtml(ta.ta)}</button>` : `<span class="hint">—</span>`}</td>
+            </tr>`;
+          }).join("")}</tbody>
+        </table></div>
+        <div class="hint" style="margin-top:6px;">Suggested TAs are who normally covers that line — click to use them as relief, or pick anyone else below.</div>
+      </div>
+    `;
+    panel.querySelectorAll("[data-suggest-relief]").forEach(b => b.addEventListener("click", () => {
+      document.getElementById("rf-relief").value = b.dataset.suggestRelief;
+      toast(`${b.dataset.suggestRelief} set as relief.`);
+    }));
+  }
+  dateInput.addEventListener("change", () => { renderSessionCheckboxes(); renderClassesPanel(); });
   typeSel.addEventListener("change", renderSessionCheckboxes);
   renderSessionCheckboxes();
+  renderClassesPanel();
 
   document.getElementById("reliefForm").addEventListener("submit", e => {
     e.preventDefault();
@@ -852,6 +946,41 @@ function renderReliefLog(filter=""){
   }));
 }
 
+/** classGrid/taGrid use a "real teaching session" index that skips
+ * Wednesday's Support Group gap — this converts an app session index
+ * (which DOES include the SG slot at position 2) to that grid index.
+ * Returns null for Wednesday's SG slot itself, which has no class data. */
+function gridSessionIndex(dayKey, appSessionIdx){
+  if(dayKey === "wednesday"){
+    if(appSessionIdx === 2) return null;
+    if(appSessionIdx === 3) return 2;
+  }
+  return appSessionIdx;
+}
+function classGridFor(dayKey, appSessionIdx){
+  const gi = gridSessionIndex(dayKey, appSessionIdx);
+  if(gi === null) return [];
+  return state.timetable.classGrid.filter(c => c.day === dayKey && c.session === gi);
+}
+function taGridFor(dayKey, appSessionIdx){
+  const gi = gridSessionIndex(dayKey, appSessionIdx);
+  if(gi === null) return [];
+  return state.timetable.taGrid.filter(t => t.day === dayKey && t.session === gi);
+}
+/** What a specific teacher is teaching today (day) — used by both the
+ * Dashboard and the Relief form. */
+function classesForTeacherToday(teacherName, dayKey){
+  if(!dayKey) return [];
+  const dayInfo = state.timetable.days[dayKey];
+  const times = state.timetable.times[dayInfo.kind];
+  const out = [];
+  times.forEach((t, i) => {
+    const entry = classGridFor(dayKey, i).find(c => c.teacher === teacherName);
+    if(entry) out.push({ sessionIdx: i, sessionLabel: t[0], time: `${t[1]}–${t[2]}`, ...entry });
+  });
+  return out;
+}
+
 function sessionDescriptionFor(r){
   const dayKey = dayKeyFromISO(r.date);
   if(!dayKey) return { text: "", lines: [] };
@@ -862,6 +991,88 @@ function sessionDescriptionFor(r){
   const idxs = r.sessions && r.sessions.length ? r.sessions : times.map((_,i)=>i);
   const parts = idxs.map(i => `S${times[i][0]} ${times[i][1]}–${times[i][2]} (${dayInfo.lines[i]})`);
   return { text: parts.join(", "), lines: idxs.map(i => dayInfo.lines[i]) };
+}
+
+/** One consolidated page for every absence today — for the staffroom wall
+ * or front office, distinct from the per-absence cover sheet. */
+function printTodaysCoverage(){
+  const today = todayISO();
+  const entries = state.relief.log.filter(r => r.date === today);
+  const el = document.getElementById("printSheet");
+  el.innerHTML = `
+    <div class="print-sheet">
+      <h1>Today's Coverage</h1>
+      <p>${escapeHtml(state.meta.schoolName)} · ${escapeHtml(state.meta.learningArea)} · ${fmtDateLong(today)}</p>
+      ${entries.length ? `<table border="1" cellpadding="6" style="border-collapse:collapse;width:100%;">
+        <tr><th>Absent</th><th>Sessions</th><th>Relief</th><th>Room</th><th>Notes</th></tr>
+        ${entries.map(r => {
+          const sess = sessionDescriptionFor(r);
+          return `<tr><td>${escapeHtml(r.absentStaffName)}</td><td>${escapeHtml(sess.text)}</td><td>${escapeHtml(r.reliefStaffName || "TBC")}</td><td>${escapeHtml(r.room || "—")}</td><td>${escapeHtml(r.notes || "—")}</td></tr>`;
+        }).join("")}
+      </table>` : `<p>No absences logged for today.</p>`}
+      <p class="pfoot">Printed ${new Date().toLocaleString("en-AU")}</p>
+    </div>
+  `;
+  window.print();
+}
+
+/** This term's relief numbers — absences, reasons, who's covering most,
+ * pending pay entries. Bounded to the current term's date range if we're
+ * in one, otherwise shows everything logged. */
+function renderReliefStats(){
+  const box = document.getElementById("reliefStats");
+  if(!box) return;
+  const ti = currentTermInfo();
+  let entries = state.relief.log;
+  let scopeLabel = "logged";
+  if(ti.inTerm){
+    const term = state.settings.terms.find(t => t.number === ti.number);
+    entries = entries.filter(r => r.date >= term.startDate && r.date <= term.endDate);
+    scopeLabel = `Term ${ti.number}`;
+  }
+
+  const byReason = {};
+  entries.forEach(r => { const k = r.reason || "Unspecified"; byReason[k] = (byReason[k] || 0) + 1; });
+  const topReasons = Object.entries(byReason).sort((a,b) => b[1] - a[1]);
+
+  const byReliever = {};
+  entries.forEach(r => { if(r.reliefStaffName) byReliever[r.reliefStaffName] = (byReliever[r.reliefStaffName] || 0) + 1; });
+  const topRelievers = Object.entries(byReliever).sort((a,b) => b[1] - a[1]).slice(0, 6);
+
+  const unpaid = entries.filter(r => !r.enteredForPay).length;
+
+  const rowHtml = (label, count) => `
+    <div class="item" style="padding:7px 10px;">
+      <div class="item-main" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>${escapeHtml(label)}</span><span class="mono badge badge-muted">${count}</span>
+      </div>
+    </div>`;
+
+  box.innerHTML = `
+    <div class="row" style="gap:10px; margin-bottom:14px;">
+      <div class="stat-tile" style="flex:1;"><div class="stat-num mono">${entries.length}</div><div class="stat-label">Absences ${escapeHtml(scopeLabel)}</div></div>
+      <div class="stat-tile" style="flex:1;"><div class="stat-num mono" style="color:${unpaid ? "var(--flag)" : "inherit"}">${unpaid}</div><div class="stat-label">Pending pay entry</div></div>
+      <div class="stat-tile" style="flex:1;"><div class="stat-num mono">${Object.keys(byReliever).length}</div><div class="stat-label">People covering</div></div>
+    </div>
+    <div class="grid grid-2">
+      <div><h3 style="margin-bottom:6px;">By reason</h3>${topReasons.length ? topReasons.map(([r,c]) => rowHtml(r,c)).join("") : `<div class="hint">No data yet.</div>`}</div>
+      <div><h3 style="margin-bottom:6px;">Most-used relief</h3>${topRelievers.length ? topRelievers.map(([n,c]) => rowHtml(n,c)).join("") : `<div class="hint">No data yet.</div>`}</div>
+    </div>
+  `;
+}
+
+/** Search across tasks, relief log, meetings, team/relief pool and the
+ * Teams upload queue — feeds the Dashboard's "Search this app" box. */
+function globalSearch(query){
+  const q = query.trim().toLowerCase();
+  if(!q) return [];
+  const results = [];
+  state.tasks.forEach(t => { if(`${t.title} ${t.notes}`.toLowerCase().includes(q)) results.push({ type: "Task", label: t.title, tab: "tasks" }); });
+  state.relief.log.forEach(r => { if(`${r.absentStaffName} ${r.reliefStaffName||""} ${r.reason||""} ${r.notes||""}`.toLowerCase().includes(q)) results.push({ type: "Relief", label: `${r.absentStaffName} — ${fmtDateShort(r.date)}`, tab: "relief" }); });
+  state.meetings.items.forEach(m => { if(`${m.type} ${m.focus} ${m.minutes||""}`.toLowerCase().includes(q)) results.push({ type: "Meeting", label: `${m.type} — ${m.focus} (${fmtDateShort(m.date)})`, tab: "meetings" }); });
+  reliefCandidateObjects().forEach(c => { if(`${c.name} ${c.subjects||""} ${c.availability||""}`.toLowerCase().includes(q)) results.push({ type: c.isTeam ? "Team" : "Relief pool", label: c.name, tab: c.isTeam ? "team" : "relief" }); });
+  state.files.queue.forEach(f => { if(`${f.fileName} ${f.destination}`.toLowerCase().includes(q)) results.push({ type: "Teams queue", label: f.fileName, tab: "team" }); });
+  return results.slice(0, 10);
 }
 
 function openReliefOutputs(r){
@@ -1663,6 +1874,16 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("poolModalSave").addEventListener("click", savePoolModal);
   document.getElementById("poolModalBackdrop").addEventListener("click", e => { if(e.target.id === "poolModalBackdrop") closePoolModal(); });
   document.addEventListener("keydown", e => { if(e.key === "Escape") closePoolModal(); });
+
+  // Single persistent listener (registered once, not per-render) that closes
+  // the global-search results dropdown on an outside click, whichever tab
+  // is currently showing it.
+  document.addEventListener("click", e => {
+    const input = document.getElementById("appSearchInput");
+    const results = document.getElementById("appSearchResults");
+    if(!input || !results) return;
+    if(!input.contains(e.target) && !results.contains(e.target)) results.style.display = "none";
+  });
 
   const startTab = (location.hash || "#dashboard").replace("#","");
   showTab(TABS.some(t=>t.id===startTab) ? startTab : "dashboard");
