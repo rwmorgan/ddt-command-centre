@@ -1,0 +1,8 @@
+# Real staff names, phone numbers and emails — never published.
+# The app works fine without this file; it just starts with an empty
+# team/relief pool. Import a backup from Settings to load real data.
+local-seed.js
+
+# Browser/OS noise
+.DS_Store
+Thumbs.db
