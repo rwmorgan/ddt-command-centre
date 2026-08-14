@@ -1430,7 +1430,12 @@ function renderMeetings(){
               <option>PLT/LA</option>
               <option>GSM</option>
               <option>Senior Staff</option>
+              <option value="__other">Other…</option>
             </select>
+          </div>
+          <div class="field" id="mf-type-other-wrap" style="display:none;">
+            <label for="mf-type-other">Meeting name</label>
+            <input type="text" id="mf-type-other" placeholder="e.g. Curriculum Day">
           </div>
           <div class="field">
             <label for="mf-date">Date</label>
@@ -1463,9 +1468,18 @@ function renderMeetings(){
     <div class="card section-gap" id="meetingDetailCard" style="display:none;"></div>
   `;
 
+  const mfTypeSel = document.getElementById("mf-type");
+  mfTypeSel.addEventListener("change", () => {
+    document.getElementById("mf-type-other-wrap").style.display = mfTypeSel.value === "__other" ? "" : "none";
+  });
+
   document.getElementById("meetingForm").addEventListener("submit", e => {
     e.preventDefault();
-    const type = document.getElementById("mf-type").value;
+    let type = mfTypeSel.value;
+    if(type === "__other"){
+      type = document.getElementById("mf-type-other").value.trim();
+      if(!type){ toast("Enter a name for this meeting."); return; }
+    }
     const focus = document.getElementById("mf-focus").value;
     const m = {
       id: uid(), type, date: document.getElementById("mf-date").value, focus,
