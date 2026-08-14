@@ -611,7 +611,7 @@ function renderDashboard(){
         <div class="card-head"><h2>${icon("calendar")} Next meeting</h2><button class="btn btn-sm" data-goto="meetings">All meetings</button></div>
         ${nextMeeting ? `
           <div class="item-title">${escapeHtml(nextMeeting.type)} — ${escapeHtml(nextMeeting.focus||"")}</div>
-          <div class="item-sub mono">${fmtDateLong(nextMeeting.date)}</div>
+          <div class="item-sub mono">${fmtDateLong(nextMeeting.date)}${formatMeetingTime(nextMeeting.startTime, nextMeeting.endTime) ? " · " + escapeHtml(formatMeetingTime(nextMeeting.startTime, nextMeeting.endTime)) : ""}</div>
         ` : `<div class="empty-state" style="padding:16px;">No upcoming meetings scheduled. Add one in the Meetings tab.</div>`}
       </div>
       <div class="card">
@@ -1413,6 +1413,24 @@ function printCoverSheet(r, sess){
 /* ---------------------------------------------------------------------- */
 /* MEETINGS                                                                */
 /* ---------------------------------------------------------------------- */
+/** "3:30 pm–4:15 pm (45 min)" from 24hr HH:MM strings — either end is
+ * optional, and duration only shows when both are present and end > start. */
+function formatMeetingTime(start, end){
+  const fmt = hhmm => {
+    const [h, m] = hhmm.split(":").map(Number);
+    return new Date(2000, 0, 1, h, m).toLocaleTimeString("en-AU", { hour: "numeric", minute: "2-digit" });
+  };
+  if(start && end){
+    const [sh, sm] = start.split(":").map(Number);
+    const [eh, em] = end.split(":").map(Number);
+    const mins = (eh * 60 + em) - (sh * 60 + sm);
+    const dur = mins > 0 ? ` (${mins >= 60 ? `${Math.floor(mins/60)}h${mins%60 ? " " + (mins%60) + "m" : ""}` : mins + " min"})` : "";
+    return `${fmt(start)}–${fmt(end)}${dur}`;
+  }
+  if(start) return `From ${fmt(start)}`;
+  if(end) return `Until ${fmt(end)}`;
+  return "";
+}
 function renderMeetings(){
   const root = document.getElementById("view-meetings");
   const today = todayISO();
@@ -1440,6 +1458,14 @@ function renderMeetings(){
           <div class="field">
             <label for="mf-date">Date</label>
             <input type="date" id="mf-date" value="${today}" required>
+          </div>
+          <div class="field">
+            <label for="mf-start">Start time (optional)</label>
+            <input type="time" id="mf-start">
+          </div>
+          <div class="field">
+            <label for="mf-end">End time (optional)</label>
+            <input type="time" id="mf-end">
           </div>
           <div class="field">
             <label for="mf-focus">Focus</label>
@@ -1483,6 +1509,8 @@ function renderMeetings(){
     const focus = document.getElementById("mf-focus").value;
     const m = {
       id: uid(), type, date: document.getElementById("mf-date").value, focus,
+      startTime: document.getElementById("mf-start").value,
+      endTime: document.getElementById("mf-end").value,
       agenda: [...(state.meetings.standingItems[focus] || state.meetings.standingItems["General"])],
       minutes: "", actions: [],
     };
@@ -1504,10 +1532,11 @@ function renderMeetings(){
 }
 
 function meetingItemHtml(m){
+  const timeStr = formatMeetingTime(m.startTime, m.endTime);
   return `<div class="item">
     <div class="item-main">
       <div class="item-title">${escapeHtml(m.type)} — ${escapeHtml(m.focus)}</div>
-      <div class="item-sub mono">${fmtDateShort(m.date)} · ${m.actions.filter(a=>!a.done).length} open action(s)</div>
+      <div class="item-sub mono">${fmtDateShort(m.date)}${timeStr ? " · " + escapeHtml(timeStr) : ""} · ${m.actions.filter(a=>!a.done).length} open action(s)</div>
     </div>
     <div class="item-actions">
       <button class="btn btn-sm" data-open-meeting="${m.id}">${icon("edit")} Open</button>
@@ -1521,13 +1550,18 @@ function openMeetingDetail(id){
   if(!m) return;
   const card = document.getElementById("meetingDetailCard");
   card.style.display = "";
+  const timeStrDetail = formatMeetingTime(m.startTime, m.endTime);
   card.innerHTML = `
     <div class="card-head">
-      <h2>${escapeHtml(m.type)} — ${escapeHtml(m.focus)} <span class="eyebrow mono">${fmtDateShort(m.date)}</span></h2>
+      <h2>${escapeHtml(m.type)} — ${escapeHtml(m.focus)} <span class="eyebrow mono" id="meetingDetailTimeEyebrow">${fmtDateShort(m.date)}${timeStrDetail ? " · " + escapeHtml(timeStrDetail) : ""}</span></h2>
       <div class="row" style="gap:6px;">
         <button class="btn btn-sm" id="printMinutesBtn">${icon("print")} Print</button>
         <button class="btn btn-sm" id="closeMeetingBtn">Close</button>
       </div>
+    </div>
+    <div class="row">
+      <div class="field"><label for="detailStart">Start time</label><input type="time" id="detailStart" value="${escapeHtml(m.startTime||"")}"></div>
+      <div class="field"><label for="detailEnd">End time</label><input type="time" id="detailEnd" value="${escapeHtml(m.endTime||"")}"></div>
     </div>
     <div class="field">
       <label>Agenda</label>
@@ -1604,6 +1638,12 @@ function openMeetingDetail(id){
     document.getElementById("actionNew").value=""; persist(); renderActions();
   });
   document.getElementById("minutesText").addEventListener("input", e => { m.minutes = e.target.value; persist(); });
+  function refreshTimeEyebrow(){
+    const t = formatMeetingTime(m.startTime, m.endTime);
+    document.getElementById("meetingDetailTimeEyebrow").textContent = fmtDateShort(m.date) + (t ? " · " + t : "");
+  }
+  document.getElementById("detailStart").addEventListener("change", e => { m.startTime = e.target.value; persist(); refreshTimeEyebrow(); });
+  document.getElementById("detailEnd").addEventListener("change", e => { m.endTime = e.target.value; persist(); refreshTimeEyebrow(); });
   document.getElementById("closeMeetingBtn").addEventListener("click", () => { card.style.display = "none"; });
   document.getElementById("printMinutesBtn").addEventListener("click", () => printMeetingMinutes(m));
 }
@@ -1615,7 +1655,7 @@ function printMeetingMinutes(m){
   el.innerHTML = `
     <div class="print-sheet">
       <h1>${escapeHtml(m.type)} — ${escapeHtml(m.focus)}</h1>
-      <p>${escapeHtml(state.meta.schoolName)} · ${escapeHtml(state.meta.learningArea)} · ${fmtDateLong(m.date)}</p>
+      <p>${escapeHtml(state.meta.schoolName)} · ${escapeHtml(state.meta.learningArea)} · ${fmtDateLong(m.date)}${formatMeetingTime(m.startTime, m.endTime) ? " · " + escapeHtml(formatMeetingTime(m.startTime, m.endTime)) : ""}</p>
       <h3>Agenda</h3>
       <ol>${m.agenda.map(a=>`<li>${escapeHtml(a)}</li>`).join("")}</ol>
       <h3>Minutes</h3>
