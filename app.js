@@ -569,9 +569,10 @@ function renderDashboard(){
   const overdue = openTasks.filter(t => t.due && t.due < today);
   const dueToday = openTasks.filter(t => t.due === today);
 
-  const nextMeeting = state.meetings.items
+  const nextMeetings = state.meetings.items
     .filter(m => m.date && m.date >= today)
-    .sort((a,b) => a.date.localeCompare(b.date))[0];
+    .sort((a,b) => a.date.localeCompare(b.date) || (a.startTime||"").localeCompare(b.startTime||""))
+    .slice(0, 4);
 
   const lineSummary = dayInfo ? dayInfo.lines.join(" · ") : "—";
 
@@ -608,11 +609,16 @@ function renderDashboard(){
 
     <div class="grid grid-2 section-gap">
       <div class="card">
-        <div class="card-head"><h2>${icon("calendar")} Next meeting</h2><button class="btn btn-sm" data-goto="meetings">All meetings</button></div>
-        ${nextMeeting ? `
-          <div class="item-title">${escapeHtml(nextMeeting.type)} — ${escapeHtml(nextMeeting.focus||"")}</div>
-          <div class="item-sub mono">${fmtDateLong(nextMeeting.date)}${formatMeetingTime(nextMeeting.startTime, nextMeeting.endTime) ? " · " + escapeHtml(formatMeetingTime(nextMeeting.startTime, nextMeeting.endTime)) : ""}</div>
-        ` : `<div class="empty-state" style="padding:16px;">No upcoming meetings scheduled. Add one in the Meetings tab.</div>`}
+        <div class="card-head"><h2>${icon("calendar")} Upcoming meetings</h2><button class="btn btn-sm" data-goto="meetings">All meetings</button></div>
+        ${nextMeetings.length ? `<div class="list">${nextMeetings.map(nm => {
+          const t = formatMeetingTime(nm.startTime, nm.endTime);
+          return `<div class="item" data-open-dash-meeting="${nm.id}" style="cursor:pointer;">
+            <div class="item-main">
+              <div class="item-title">${escapeHtml(nm.type)} — ${escapeHtml(nm.focus||"")}</div>
+              <div class="item-sub mono">${fmtDateShort(nm.date)}${t ? " · " + escapeHtml(t) : ""}</div>
+            </div>
+          </div>`;
+        }).join("")}</div>` : `<div class="empty-state" style="padding:16px;">No upcoming meetings scheduled. Add one in the Meetings tab.</div>`}
       </div>
       <div class="card">
         <div class="card-head"><h2>Quick launch</h2><button class="btn btn-sm" data-goto="settings">Edit links</button></div>
@@ -638,6 +644,11 @@ function renderDashboard(){
     state.scratchpad = e.target.value; persist();
   });
   root.querySelectorAll("[data-goto]").forEach(b => b.addEventListener("click", () => showTab(b.dataset.goto)));
+  root.querySelectorAll("[data-open-dash-meeting]").forEach(el => el.addEventListener("click", () => {
+    showTab("meetings");
+    openMeetingDetail(el.dataset.openDashMeeting);
+    document.getElementById("meetingDetailCard").scrollIntoView({ behavior: "smooth" });
+  }));
   root.querySelectorAll("[data-session-toggle]").forEach(el => el.addEventListener("click", () => {
     const panel = document.getElementById("sessionDetail" + el.dataset.sessionToggle);
     if(panel) panel.style.display = panel.style.display === "none" ? "" : "none";
