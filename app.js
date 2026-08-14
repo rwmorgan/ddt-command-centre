@@ -1650,12 +1650,40 @@ function openMeetingDetail(id){
   const card = document.getElementById("meetingDetailCard");
   card.style.display = "";
   const timeStrDetail = formatMeetingTime(m.startTime, m.endTime);
+  const STANDARD_TYPES = ["PLT/LA", "GSM", "Senior Staff"];
+  const STANDARD_FOCI = ["Reflective Practice", "Literacy Inquiry", "General"];
+  const typeIsStandard = STANDARD_TYPES.includes(m.type);
+  const focusIsStandard = STANDARD_FOCI.includes(m.focus);
   card.innerHTML = `
     <div class="card-head">
-      <h2>${escapeHtml(m.type)} — ${escapeHtml(m.focus)} <span class="eyebrow mono" id="meetingDetailTimeEyebrow">${fmtDateShort(m.date)}${timeStrDetail ? " · " + escapeHtml(timeStrDetail) : ""}</span></h2>
+      <h2><span id="meetingDetailTypeFocus">${escapeHtml(m.type)} — ${escapeHtml(m.focus)}</span> <span class="eyebrow mono" id="meetingDetailTimeEyebrow">${fmtDateShort(m.date)}${timeStrDetail ? " · " + escapeHtml(timeStrDetail) : ""}</span></h2>
       <div class="row" style="gap:6px;">
         <button class="btn btn-sm" id="printMinutesBtn">${icon("print")} Print</button>
         <button class="btn btn-sm" id="closeMeetingBtn">Close</button>
+      </div>
+    </div>
+    <div class="row">
+      <div class="field">
+        <label for="detailType">Meeting type</label>
+        <select id="detailType">
+          <option>PLT/LA</option><option>GSM</option><option>Senior Staff</option>
+          <option value="__other" ${!typeIsStandard ? "selected" : ""}>Other…</option>
+        </select>
+      </div>
+      <div class="field" id="detailTypeOtherWrap" style="display:${typeIsStandard ? "none" : ""};">
+        <label for="detailTypeOther">Meeting name</label>
+        <input type="text" id="detailTypeOther" value="${!typeIsStandard ? escapeHtml(m.type) : ""}">
+      </div>
+      <div class="field">
+        <label for="detailFocus">Focus</label>
+        <select id="detailFocus">
+          <option>Reflective Practice</option><option>Literacy Inquiry</option><option>General</option>
+          <option value="__other" ${!focusIsStandard ? "selected" : ""}>Other…</option>
+        </select>
+      </div>
+      <div class="field" id="detailFocusOtherWrap" style="display:${focusIsStandard ? "none" : ""};">
+        <label for="detailFocusOther">Focus name</label>
+        <input type="text" id="detailFocusOther" value="${!focusIsStandard ? escapeHtml(m.focus) : ""}">
       </div>
     </div>
     <div class="row">
@@ -1741,8 +1769,36 @@ function openMeetingDetail(id){
     const t = formatMeetingTime(m.startTime, m.endTime);
     document.getElementById("meetingDetailTimeEyebrow").textContent = fmtDateShort(m.date) + (t ? " · " + t : "");
   }
+  function refreshTypeFocusHeading(){
+    document.getElementById("meetingDetailTypeFocus").textContent = `${m.type} — ${m.focus}`;
+  }
   document.getElementById("detailStart").addEventListener("change", e => { m.startTime = e.target.value; persist(); refreshTimeEyebrow(); });
   document.getElementById("detailEnd").addEventListener("change", e => { m.endTime = e.target.value; persist(); refreshTimeEyebrow(); });
+
+  const detailTypeSel = document.getElementById("detailType");
+  const detailTypeOther = document.getElementById("detailTypeOther");
+  if(typeIsStandard) detailTypeSel.value = m.type;
+  detailTypeSel.addEventListener("change", () => {
+    document.getElementById("detailTypeOtherWrap").style.display = detailTypeSel.value === "__other" ? "" : "none";
+    if(detailTypeSel.value !== "__other"){ m.type = detailTypeSel.value; persist(); refreshTypeFocusHeading(); renderMeetings(); openMeetingDetail(m.id); }
+  });
+  detailTypeOther.addEventListener("input", e => {
+    if(!e.target.value.trim()) return;
+    m.type = e.target.value.trim(); persist(); refreshTypeFocusHeading();
+  });
+
+  const detailFocusSel = document.getElementById("detailFocus");
+  const detailFocusOther = document.getElementById("detailFocusOther");
+  if(focusIsStandard) detailFocusSel.value = m.focus;
+  detailFocusSel.addEventListener("change", () => {
+    document.getElementById("detailFocusOtherWrap").style.display = detailFocusSel.value === "__other" ? "" : "none";
+    if(detailFocusSel.value !== "__other"){ m.focus = detailFocusSel.value; persist(); refreshTypeFocusHeading(); renderMeetings(); openMeetingDetail(m.id); }
+  });
+  detailFocusOther.addEventListener("input", e => {
+    if(!e.target.value.trim()) return;
+    m.focus = e.target.value.trim(); persist(); refreshTypeFocusHeading();
+  });
+
   document.getElementById("closeMeetingBtn").addEventListener("click", () => { card.style.display = "none"; });
   document.getElementById("printMinutesBtn").addEventListener("click", () => printMeetingMinutes(m));
 }
