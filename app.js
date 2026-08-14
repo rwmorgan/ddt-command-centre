@@ -1240,6 +1240,81 @@ function classesForTeacherToday(teacherName, dayKey){
   return out;
 }
 
+/* ---------------------------------------------------------------------- */
+/* Timetable modal — a teacher's full week, a TA's full week, or the      */
+/* whole TA roster for the week, built from classGrid/taGrid.             */
+/* ---------------------------------------------------------------------- */
+function openTimetableModal(title, bodyHtml){
+  document.getElementById("timetableModalTitle").textContent = title;
+  document.getElementById("timetableModalBody").innerHTML = bodyHtml;
+  document.getElementById("timetableModalBackdrop").classList.add("show");
+}
+function closeTimetableModal(){
+  document.getElementById("timetableModalBackdrop").classList.remove("show");
+}
+
+function daySectionHtml(dayKey, rowsHtml, headCols){
+  return `<h3 style="margin:16px 0 6px;">${DAY_LABEL[dayKey]}</h3>
+    <div class="table-wrap"><table>
+      <thead><tr>${headCols.map(h=>`<th>${h}</th>`).join("")}</tr></thead>
+      <tbody>${rowsHtml}</tbody>
+    </table></div>`;
+}
+
+/** One teacher's timetable across the whole week — every session, with
+ * "Free period" / "Support Group" shown for gaps rather than skipped, so
+ * the full shape of their week is visible, not just the booked slots. */
+function showTeacherTimetable(name){
+  const body = DAY_ORDER.map(dayKey => {
+    const dayInfo = state.timetable.days[dayKey];
+    const times = state.timetable.times[dayInfo.kind];
+    const bySession = {};
+    classesForTeacherToday(name, dayKey).forEach(c => { bySession[c.sessionIdx] = c; });
+    const rows = times.map((t, i) => {
+      const c = bySession[i];
+      const isSG = /support group/i.test(dayInfo.lines[i]);
+      const cell = c ? escapeHtml(c.subject) : (isSG ? `<span class="hint">Support Group</span>` : `<span class="hint">Free period</span>`);
+      return `<tr><td class="mono">${escapeHtml(t[0])}</td><td class="mono">${escapeHtml(t[1])}–${escapeHtml(t[2])}</td><td>${cell}</td><td class="mono">${c ? escapeHtml(c.room||"—") : "—"}</td></tr>`;
+    }).join("");
+    return daySectionHtml(dayKey, rows, ["S","Time","Subject","Room"]);
+  }).join("");
+  openTimetableModal(`${name} — timetable`, body);
+}
+
+/** One TA's timetable across the whole week (subject + which line, no
+ * room — the source data doesn't track rooms for TA coverage). */
+function showTaTimetable(name){
+  const body = DAY_ORDER.map(dayKey => {
+    const dayInfo = state.timetable.days[dayKey];
+    const times = state.timetable.times[dayInfo.kind];
+    const rows = times.map((t, i) => {
+      const entries = taGridFor(dayKey, i).filter(x => x.ta === name);
+      const isSG = /support group/i.test(dayInfo.lines[i]);
+      const cell = entries.length ? entries.map(e => escapeHtml(e.subject)).join(", ") : (isSG ? `<span class="hint">Support Group</span>` : `<span class="hint">Free period</span>`);
+      return `<tr><td class="mono">${escapeHtml(t[0])}</td><td class="mono">${escapeHtml(t[1])}–${escapeHtml(t[2])}</td><td>${cell}</td><td class="mono">${escapeHtml(dayInfo.lines[i])}</td></tr>`;
+    }).join("");
+    return daySectionHtml(dayKey, rows, ["S","Time","Subject","Line"]);
+  }).join("");
+  openTimetableModal(`${name} — timetable (TA)`, body);
+}
+
+/** Every TA's coverage for the whole week, organised by day/session/line
+ * — the "who's where" view, as opposed to one TA's own week. */
+function showFullTaTimetable(){
+  const body = DAY_ORDER.map(dayKey => {
+    const dayInfo = state.timetable.days[dayKey];
+    const times = state.timetable.times[dayInfo.kind];
+    const rows = times.map((t, i) => {
+      const entries = taGridFor(dayKey, i);
+      const isSG = /support group/i.test(dayInfo.lines[i]);
+      const cell = entries.length ? entries.map(e => `${escapeHtml(e.ta)} — ${escapeHtml(e.subject)}`).join("<br>") : (isSG ? `<span class="hint">Support Group</span>` : `<span class="hint">—</span>`);
+      return `<tr><td class="mono">${escapeHtml(t[0])}</td><td class="mono">${escapeHtml(t[1])}–${escapeHtml(t[2])}</td><td class="mono">${escapeHtml(dayInfo.lines[i])}</td><td>${cell}</td></tr>`;
+    }).join("");
+    return daySectionHtml(dayKey, rows, ["S","Time","Line","TA — Subject"]);
+  }).join("");
+  openTimetableModal("TA timetable — whole week", body);
+}
+
 function sessionDescriptionFor(r){
   const dayKey = dayKeyFromISO(r.date);
   if(!dayKey) return { text: "", lines: [] };
@@ -1792,7 +1867,10 @@ function renderTeamFiles(){
         </div>
       </div>
       <div class="card">
-        <div class="card-head"><h2>${icon("users")} Teacher assistants</h2></div>
+        <div class="card-head">
+          <h2>${icon("users")} Teacher assistants</h2>
+          <button class="btn btn-sm" id="viewFullTaTimetableBtn">${icon("calendar")} Full TA timetable</button>
+        </div>
         <div id="taList" class="list"></div>
         <div class="row section-gap">
           <input type="text" id="newTA" placeholder="Add TA name…" style="flex:1;">
@@ -1831,14 +1909,16 @@ function renderTeamFiles(){
 
   function renderStaffLists(){
     document.getElementById("teacherList").innerHTML = state.team.teachers.map(p => `
-      <div class="item"><div class="item-main item-title">${escapeHtml(p.name)}</div>
+      <div class="item"><button type="button" class="item-main item-title" data-view-teacher-tt="${escapeHtml(p.name)}" style="background:none;border:none;text-align:left;cursor:pointer;color:inherit;padding:0;">${escapeHtml(p.name)}</button>
       <div class="item-actions"><button class="btn btn-sm btn-danger" data-rm-teacher="${p.id}">${icon("trash")}</button></div></div>
     `).join("") || `<div class="empty-state">No teachers yet.</div>`;
     document.getElementById("taList").innerHTML = state.team.tas.map(p => `
-      <div class="item"><div class="item-main item-title">${escapeHtml(p.name)}</div>
+      <div class="item"><button type="button" class="item-main item-title" data-view-ta-tt="${escapeHtml(p.name)}" style="background:none;border:none;text-align:left;cursor:pointer;color:inherit;padding:0;">${escapeHtml(p.name)}</button>
       <div class="item-actions"><button class="btn btn-sm btn-danger" data-rm-ta="${p.id}">${icon("trash")}</button></div></div>
     `).join("") || `<div class="empty-state">No TAs yet.</div>`;
 
+    document.querySelectorAll("[data-view-teacher-tt]").forEach(b=>b.addEventListener("click",()=> showTeacherTimetable(b.dataset.viewTeacherTt)));
+    document.querySelectorAll("[data-view-ta-tt]").forEach(b=>b.addEventListener("click",()=> showTaTimetable(b.dataset.viewTaTt)));
     document.querySelectorAll("[data-rm-teacher]").forEach(b=>b.addEventListener("click",()=>{
       state.team.teachers = state.team.teachers.filter(p=>p.id!==b.dataset.rmTeacher); persist(); renderStaffLists();
     }));
@@ -1847,6 +1927,7 @@ function renderTeamFiles(){
     }));
   }
   renderStaffLists();
+  document.getElementById("viewFullTaTimetableBtn").addEventListener("click", showFullTaTimetable);
 
   document.getElementById("addTeacherBtn").addEventListener("click", () => {
     const el = document.getElementById("newTeacher"); const v = el.value.trim();
@@ -2243,7 +2324,11 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("poolModalCancel").addEventListener("click", closePoolModal);
   document.getElementById("poolModalSave").addEventListener("click", savePoolModal);
   document.getElementById("poolModalBackdrop").addEventListener("click", e => { if(e.target.id === "poolModalBackdrop") closePoolModal(); });
-  document.addEventListener("keydown", e => { if(e.key === "Escape") closePoolModal(); });
+
+  document.getElementById("timetableModalClose").addEventListener("click", closeTimetableModal);
+  document.getElementById("timetableModalBackdrop").addEventListener("click", e => { if(e.target.id === "timetableModalBackdrop") closeTimetableModal(); });
+
+  document.addEventListener("keydown", e => { if(e.key === "Escape"){ closePoolModal(); closeTimetableModal(); } });
 
   // Single persistent listener (registered once, not per-render) that closes
   // the global-search results dropdown on an outside click, whichever tab
