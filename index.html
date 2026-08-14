@@ -85,6 +85,9 @@
 
 <!-- local-seed.js is gitignored and only exists on this computer — see its
      header comment. Missing on the published copy is expected and safe. -->
+<!-- Self-hosted (not CDN) so the app has no runtime dependency on a third
+     party being reachable, except when you actually turn sync on. -->
+<script src="supabase-client.js"></script>
 <script src="local-seed.js"></script>
 <script src="app.js"></script>
 </body>

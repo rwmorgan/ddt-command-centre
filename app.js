@@ -5,6 +5,13 @@
    ========================================================================= */
 
 const STORAGE_KEY = "rc_ddt_command_centre_v1";
+
+// Safe to publish — this is the "publishable" key, meant for client-side use
+// and gated by Row Level Security on the Supabase side. It cannot read or
+// write anything without also knowing the passphrase-derived row/key below,
+// and even then only gets an encrypted blob it cannot decrypt on its own.
+const SUPABASE_URL = "https://dnmxkfdgdzkzfegfnzbq.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_4PpEPhWb87XZX6xHLgj_gA_L0FirFwB";
 const DAY_ORDER = ["monday","tuesday","wednesday","thursday","friday"];
 const DAY_LABEL = { monday:"Monday", tuesday:"Tuesday", wednesday:"Wednesday", thursday:"Thursday", friday:"Friday" };
 
@@ -51,6 +58,7 @@ function defaultState(){
       leaderName: seed.leaderName || "",
       createdAt: todayISO(),
       lastBackup: null,
+      lastSyncedAt: null,
     },
     settings: {
       theme: "workshop",
@@ -68,6 +76,9 @@ function defaultState(){
         columns: ["Date","Absent Staff","Type","Session(s)","Line/Class","Relief Staff","Reason","Notes","Entered By","Approved for Pay"],
       },
       teamsChannel: "RON – All Staff  ›  Design and Digital Technology",
+      // Blank = use the built-in SUPABASE_URL/SUPABASE_ANON_KEY above.
+      // Only fill these in if you ever move to a different Supabase project.
+      sync: { url: "", anonKey: "" },
     },
     timetable: {
       times: {
@@ -222,7 +233,193 @@ function persist(){
       const t = new Date();
       el.textContent = `Saved ${t.toLocaleTimeString("en-AU",{hour:"2-digit",minute:"2-digit"})}`;
     }
+    scheduleSyncPush();
   }, 250);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Cross-device sync (optional) — end-to-end encrypted via Supabase.      */
+/* Your passphrase never leaves this browser: it's used locally to derive */
+/* (a) an AES-256 key that encrypts/decrypts everything before it's sent, */
+/* and (b) which row in Supabase to use — so Supabase only ever sees      */
+/* ciphertext, and only devices that know your passphrase can find or     */
+/* read it. Nothing here runs, or is even loaded meaningfully, unless you */
+/* explicitly turn sync on in Settings.                                   */
+/* ---------------------------------------------------------------------- */
+const SYNC_SALT = new TextEncoder().encode("ddt-command-centre-sync-v1");
+const SYNC_KEY_STORAGE = "rc_ddt_sync_key_v1";
+const SYNC_TABLE = "sync_state";
+
+let syncClient = null;
+let syncKey = null;       // CryptoKey, derived from the passphrase
+let syncRowId = null;     // deterministic UUID, also derived from the passphrase
+let syncChannel = null;
+let syncStatus = "off";   // off | connecting | synced | error
+let syncPushTimer = null;
+
+function getSyncClient(){
+  if(syncClient) return syncClient;
+  if(typeof window.supabase === "undefined") return null;
+  const url = (state.settings.sync && state.settings.sync.url) || SUPABASE_URL;
+  const key = (state.settings.sync && state.settings.sync.anonKey) || SUPABASE_ANON_KEY;
+  if(!url || !key) return null;
+  syncClient = window.supabase.createClient(url, key);
+  return syncClient;
+}
+
+/** Derives both the AES-GCM key and a deterministic row UUID from one
+ * passphrase — so entering the same passphrase on two devices is all it
+ * takes for them to find each other, with no separate "sync code" to share. */
+async function deriveSyncMaterial(passphrase){
+  const enc = new TextEncoder();
+  const baseKey = await crypto.subtle.importKey("raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
+  const key = await crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt: SYNC_SALT, iterations: 150000, hash: "SHA-256" },
+    baseKey, { name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]
+  );
+  const idBits = await crypto.subtle.digest("SHA-256", enc.encode(passphrase + ":rowid:v1"));
+  const idBytes = new Uint8Array(idBits).slice(0, 16);
+  const hex = [...idBytes].map(b => b.toString(16).padStart(2, "0")).join("");
+  const rowId = `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20,32)}`;
+  return { key, rowId };
+}
+async function encryptForSync(obj){
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const data = new TextEncoder().encode(JSON.stringify(obj));
+  const cipher = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, syncKey, data);
+  return btoa(String.fromCharCode(...iv)) + ":" + btoa(String.fromCharCode(...new Uint8Array(cipher)));
+}
+async function decryptFromSync(payload){
+  const [ivB64, cipherB64] = payload.split(":");
+  const iv = Uint8Array.from(atob(ivB64), c => c.charCodeAt(0));
+  const cipher = Uint8Array.from(atob(cipherB64), c => c.charCodeAt(0));
+  const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, syncKey, cipher);
+  return JSON.parse(new TextDecoder().decode(plain));
+}
+
+async function enableSync(passphrase, remember){
+  const client = getSyncClient();
+  if(!client){ toast("Sync couldn't start — check the Supabase details in Settings."); return false; }
+  try {
+    const { key, rowId } = await deriveSyncMaterial(passphrase);
+    syncKey = key; syncRowId = rowId;
+    if(remember){
+      const raw = await crypto.subtle.exportKey("raw", key);
+      localStorage.setItem(SYNC_KEY_STORAGE, JSON.stringify({ rowId, keyB64: btoa(String.fromCharCode(...new Uint8Array(raw))) }));
+    }
+    await syncPullAndMerge(true);
+    subscribeSyncChannel();
+    return true;
+  } catch(e){
+    console.error("enableSync failed", e);
+    toast("Couldn't set up sync — check your connection and try again.");
+    return false;
+  }
+}
+
+async function loadRememberedSync(){
+  const raw = localStorage.getItem(SYNC_KEY_STORAGE);
+  if(!raw) return false;
+  try {
+    const { rowId, keyB64 } = JSON.parse(raw);
+    const keyBytes = Uint8Array.from(atob(keyB64), c => c.charCodeAt(0));
+    syncKey = await crypto.subtle.importKey("raw", keyBytes, "AES-GCM", true, ["encrypt", "decrypt"]);
+    syncRowId = rowId;
+    const client = getSyncClient();
+    if(!client) return false;
+    await syncPullAndMerge(false);
+    subscribeSyncChannel();
+    return true;
+  } catch(e){
+    console.error("loadRememberedSync failed", e);
+    return false;
+  }
+}
+
+function forgetSync(){
+  localStorage.removeItem(SYNC_KEY_STORAGE);
+  syncKey = null; syncRowId = null;
+  if(syncChannel){ try { getSyncClient()?.removeChannel(syncChannel); } catch(e){} syncChannel = null; }
+  clearInterval(syncPollTimer);
+  syncStatus = "off";
+  updateSyncStatusUI();
+}
+
+async function syncPullAndMerge(isInitialSetup){
+  const client = getSyncClient();
+  if(!client || !syncKey || !syncRowId) return;
+  syncStatus = "connecting"; updateSyncStatusUI();
+  try {
+    const { data, error } = await client.from(SYNC_TABLE).select("payload, updated_at").eq("id", syncRowId).maybeSingle();
+    if(error) throw error;
+    if(data && data.payload){
+      const remote = await decryptFromSync(data.payload);
+      const remoteTime = new Date(data.updated_at).getTime();
+      const localTime = state.meta.lastSyncedAt ? new Date(state.meta.lastSyncedAt).getTime() : 0;
+      if(remoteTime > localTime){
+        state = deepMerge(defaultState(), remote);
+        state.meta.lastSyncedAt = data.updated_at;
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+        renderAll();
+        toast("Synced from your other device.");
+      }
+    } else if(isInitialSetup){
+      await syncPush(); // nothing there yet — seed it with this device's data
+    }
+    if(syncKey) syncStatus = "synced"; // guard: sync may have been turned off while this request was in flight
+  } catch(e){
+    console.error("syncPullAndMerge failed", e);
+    if(syncKey) syncStatus = "error";
+  }
+  updateSyncStatusUI();
+}
+
+function scheduleSyncPush(){
+  if(!syncKey || !syncRowId) return;
+  clearTimeout(syncPushTimer);
+  syncPushTimer = setTimeout(syncPush, 800);
+}
+async function syncPush(){
+  const client = getSyncClient();
+  if(!client || !syncKey || !syncRowId) return;
+  syncStatus = "connecting"; updateSyncStatusUI();
+  try {
+    const payload = await encryptForSync(state);
+    const now = new Date().toISOString();
+    const { error } = await client.from(SYNC_TABLE).upsert({ id: syncRowId, payload, updated_at: now });
+    if(error) throw error;
+    state.meta.lastSyncedAt = now;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    if(syncKey) syncStatus = "synced"; // guard: sync may have been turned off while this request was in flight
+  } catch(e){
+    console.error("syncPush failed", e);
+    if(syncKey) syncStatus = "error";
+  }
+  updateSyncStatusUI();
+}
+
+var syncPollTimer = null;
+function subscribeSyncChannel(){
+  const client = getSyncClient();
+  if(!client || !syncRowId) return;
+  if(syncChannel){ try { client.removeChannel(syncChannel); } catch(e){} }
+  syncChannel = client.channel("sync_state_" + syncRowId)
+    .on("postgres_changes", { event: "*", schema: "public", table: SYNC_TABLE, filter: `id=eq.${syncRowId}` }, () => syncPullAndMerge(false))
+    .subscribe();
+
+  // Belt-and-braces polling fallback — covers the gap if realtime push isn't
+  // enabled for the table, or a mobile connection drops the live socket
+  // without reconnecting cleanly. Cheap: one small row read every 20s.
+  clearInterval(syncPollTimer);
+  syncPollTimer = setInterval(() => { if(syncKey && syncRowId) syncPullAndMerge(false); }, 20000);
+}
+
+function updateSyncStatusUI(){
+  const el = document.getElementById("syncStatusIndicator");
+  if(!el) return;
+  const map = { off: "Not set up", connecting: "Syncing…", synced: "Synced ✓", error: "Sync error — working offline" };
+  el.textContent = map[syncStatus] || syncStatus;
+  el.className = "badge " + (syncStatus === "synced" ? "badge-good" : syncStatus === "error" ? "badge-flag" : "badge-muted");
 }
 
 /* ---------------------------------------------------------------------- */
@@ -1786,6 +1983,22 @@ function renderSettings(){
       </div>
     </div>
 
+    <div class="card section-gap" id="syncCard">
+      <div class="card-head">
+        <h2>${icon("phone")} Sync across devices</h2>
+        <span class="badge badge-muted" id="syncStatusIndicator">Not set up</span>
+      </div>
+      ${syncKey ? `
+        <p class="hint">Sync is on for this device. Logging something here shows up on your other device within a few seconds, and vice versa.</p>
+        <button class="btn btn-danger" id="syncForgetBtn">Turn off sync on this device</button>
+      ` : `
+        <p class="hint">One passphrase, entered on each device, keeps your laptop and phone in sync automatically. It's never sent anywhere — everything is encrypted in this browser before it leaves, so the sync service only ever sees scrambled data it can't read. <strong>If you forget this passphrase, synced data can't be recovered</strong> — worth saving it in a password manager.</p>
+        <div class="field"><label for="sync-passphrase">Sync passphrase</label><input type="password" id="sync-passphrase" placeholder="Choose (or re-enter) your sync passphrase" autocomplete="off"></div>
+        <div class="field"><label class="checkline"><input type="checkbox" id="sync-remember" checked> Remember on this device (skip re-entering it each visit)</label></div>
+        <button class="btn btn-primary" id="syncEnableBtn">${icon("phone")} Turn on sync</button>
+      `}
+    </div>
+
     <div class="card section-gap">
       <div class="card-head"><h2>Danger zone</h2></div>
       <button class="btn btn-danger" id="resetBtn">Reset all data to defaults</button>
@@ -1844,6 +2057,24 @@ function renderSettings(){
 
   document.getElementById("exportBtn").addEventListener("click", exportBackup);
   document.getElementById("importBtn").addEventListener("click", importBackup);
+
+  updateSyncStatusUI();
+  const syncEnableBtn = document.getElementById("syncEnableBtn");
+  if(syncEnableBtn) syncEnableBtn.addEventListener("click", async () => {
+    const pass = document.getElementById("sync-passphrase").value;
+    if(!pass || pass.length < 6){ toast("Use a passphrase of at least 6 characters."); return; }
+    const remember = document.getElementById("sync-remember").checked;
+    syncEnableBtn.disabled = true; syncEnableBtn.textContent = "Connecting…";
+    const ok = await enableSync(pass, remember);
+    if(ok){ toast("Sync turned on."); renderSettings(); } else { syncEnableBtn.disabled = false; syncEnableBtn.textContent = "Turn on sync"; }
+  });
+  const syncForgetBtn = document.getElementById("syncForgetBtn");
+  if(syncForgetBtn) syncForgetBtn.addEventListener("click", () => {
+    if(!confirm("Turn off sync on this device? Your data here stays as-is, but this device will stop sending/receiving updates until you re-enter the passphrase.")) return;
+    forgetSync();
+    toast("Sync turned off on this device.");
+    renderSettings();
+  });
   document.getElementById("resetBtn").addEventListener("click", () => {
     if(!confirm("This will erase ALL data (team, relief log, tasks, meetings) and restore defaults. Export a backup first if unsure. Continue?")) return;
     state = defaultState(); persist(); toast("Reset to defaults."); renderAll();
@@ -1956,4 +2187,6 @@ document.addEventListener("DOMContentLoaded", () => {
   window.addEventListener("beforeunload", () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   });
+
+  loadRememberedSync();
 });
