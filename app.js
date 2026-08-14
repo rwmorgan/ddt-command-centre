@@ -1484,7 +1484,12 @@ function renderMeetings(){
               <option>Reflective Practice</option>
               <option>Literacy Inquiry</option>
               <option>General</option>
+              <option value="__other">Other…</option>
             </select>
+          </div>
+          <div class="field" id="mf-focus-other-wrap" style="display:none;">
+            <label for="mf-focus-other">Focus name</label>
+            <input type="text" id="mf-focus-other" placeholder="e.g. Numeracy">
           </div>
         </div>
         <button class="btn btn-primary" type="submit">${icon("plus")} Add meeting</button>
@@ -1509,6 +1514,10 @@ function renderMeetings(){
   mfTypeSel.addEventListener("change", () => {
     document.getElementById("mf-type-other-wrap").style.display = mfTypeSel.value === "__other" ? "" : "none";
   });
+  const mfFocusSel = document.getElementById("mf-focus");
+  mfFocusSel.addEventListener("change", () => {
+    document.getElementById("mf-focus-other-wrap").style.display = mfFocusSel.value === "__other" ? "" : "none";
+  });
 
   document.getElementById("meetingForm").addEventListener("submit", e => {
     e.preventDefault();
@@ -1517,7 +1526,11 @@ function renderMeetings(){
       type = document.getElementById("mf-type-other").value.trim();
       if(!type){ toast("Enter a name for this meeting."); return; }
     }
-    const focus = document.getElementById("mf-focus").value;
+    let focus = mfFocusSel.value;
+    if(focus === "__other"){
+      focus = document.getElementById("mf-focus-other").value.trim();
+      if(!focus){ toast("Enter a name for this meeting's focus."); return; }
+    }
     const m = {
       id: uid(), type, date: document.getElementById("mf-date").value, focus,
       startTime: document.getElementById("mf-start").value,
