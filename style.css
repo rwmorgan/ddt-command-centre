@@ -164,6 +164,7 @@ main { flex: 1; padding: 22px; max-width: 1280px; width: 100%; margin: 0 auto; }
 }
 
 .grid { display: grid; gap: 16px; }
+.grid > * { min-width: 0; } /* stops a wide-content child (e.g. a <select> with long options) from forcing its grid track past the container */
 .grid-2 { grid-template-columns: 1.3fr 1fr; }
 .grid-3 { grid-template-columns: repeat(3, 1fr); }
 @media (max-width: 900px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
@@ -251,7 +252,7 @@ input[type=url], input[type=search], select, textarea {
 textarea { resize: vertical; min-height: 70px; font-family: inherit; }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); }
 .row { display: flex; gap: 10px; flex-wrap: wrap; }
-.row > .field { flex: 1; min-width: 160px; }
+.row > .field { flex: 1; flex-basis: 160px; min-width: 0; } /* min-width:0 stops a wide <select>'s intrinsic content size from forcing the row wider than its container */
 fieldset { border: none; padding: 0; margin: 0; }
 .checkline { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .checkline input { width: 15px; height: 15px; }
@@ -394,6 +395,52 @@ footer.app-foot {
 
 /* ---------- scratchpad ---------- */
 #scratchpad { min-height: 90px; }
+
+/* ---------- larger text on phones ---------- */
+/* A global font-size bump alone wouldn't reach most of this file, since
+   nearly every element sets its own explicit size — so this reproduces
+   the type scale at roughly 115-125% for phone-width screens instead.
+   Desktop/laptop use (anything wider than 700px) is untouched. */
+@media (max-width: 700px) {
+  body { font-size: 17px; }
+  .eyebrow { font-size: 12.5px; }
+  h1 { font-size: 23px; }
+  h2 { font-size: 17px; }
+  h3 { font-size: 15px; }
+  .brand-mark { font-size: 14px; }
+  .topbar-clock .mono { font-size: 15px; }
+  .tabnav button { font-size: 15.5px; padding: 13px 15px; }
+  .titleblock dt { font-size: 11.5px; }
+  .titleblock dd { font-size: 17px; }
+  .session-badge { font-size: 12.5px; }
+  .session-time { font-size: 14px; }
+  .session-away { font-size: 13px; }
+  .qtile span { font-size: 13px; }
+  .field label { font-size: 14px; }
+  .field .hint { font-size: 13px; }
+  input[type=text], input[type=date], input[type=time], input[type=number],
+  input[type=url], input[type=search], select, textarea {
+    font-size: 16px; /* also avoids auto-zoom-on-focus on iOS Safari */
+    padding: 10px 12px;
+  }
+  .checkline { font-size: 15px; }
+  .btn { font-size: 15px; padding: 10px 15px; }
+  .btn-sm { font-size: 13.5px; padding: 7px 12px; }
+  .badge { font-size: 12.5px; padding: 4px 9px; }
+  .chip { font-size: 13px; padding: 6px 12px; }
+  .item-title { font-size: 15px; }
+  .item-sub { font-size: 13.5px; }
+  table { font-size: 15px; }
+  th { font-size: 11.5px; }
+  .output-panel { font-size: 15px; }
+  .output-panel.mono-block { font-size: 14px; }
+  #toast { font-size: 15px; }
+  .banner { font-size: 14px; }
+  footer.app-foot { font-size: 13px; }
+  .stat-num { font-size: 24px; }
+  .stat-label { font-size: 12px; }
+  .mono, .num, time { letter-spacing: -0.005em; } /* a touch more breathing room at larger sizes */
+}
 
 /* ---------- print (cover sheet) ---------- */
 .print-only { display: none; }
