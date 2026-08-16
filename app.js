@@ -152,6 +152,12 @@ function loadState(){
     backfillQuickLaunchSchemes(merged, def);
     correctKnownBadSchemes(merged);
     backfillFavorites(merged);
+    // Same class of gap as favourites/schemes above — data saved before
+    // local-seed.js had a leaderName would otherwise be stuck showing the
+    // "[Your name]" placeholder forever.
+    if(!merged.meta.leaderName && window.LOCAL_SEED && window.LOCAL_SEED.leaderName){
+      merged.meta.leaderName = window.LOCAL_SEED.leaderName;
+    }
     if(merged.settings && merged.settings.term) delete merged.settings.term; // replaced by settings.terms (whole-year model)
     return merged;
   } catch(e){
@@ -1409,17 +1415,35 @@ function globalSearch(query){
   return results.slice(0, 10);
 }
 
+/** The absent teacher's actual classes for the affected session(s), pulled
+ * from classGrid — empty if there's no class data for them that day (e.g.
+ * "Other" staff, a non-teaching duty, or the published copy with no
+ * local-seed.js), in which case the message just omits this detail. */
+function classesToCoverFor(r){
+  const dayKey = dayKeyFromISO(r.date);
+  if(!dayKey || r.type === "duty") return [];
+  const all = classesForTeacherToday(r.absentStaffName, dayKey);
+  if(r.type === "sessions" && r.sessions && r.sessions.length){
+    return all.filter(c => r.sessions.includes(c.sessionIdx));
+  }
+  return all;
+}
+
 function openReliefOutputs(r){
   const card = document.getElementById("reliefOutputCard");
   card.style.display = "";
   const sess = sessionDescriptionFor(r);
   const leader = state.meta.leaderName || "[Your name]";
+  const leaderFirst = leader.split(" ")[0];
   const school = state.meta.schoolName;
+  const classes = classesToCoverFor(r);
+  const classesShort = classes.length ? classes.map(c => `S${c.sessionLabel} ${c.subject}${c.room ? " (" + c.room + ")" : ""}`).join("; ") : "";
+  const classesLines = classes.length ? classes.map(c => `  • S${c.sessionLabel} (${c.time}): ${c.subject}${c.room ? " — Room " + c.room : ""}`).join("\n") : "";
 
-  const smsText = `Hi${r.reliefStaffName ? " " + r.reliefStaffName.split(" ")[0] : ""}, can you cover ${r.absentStaffName} on ${fmtDateShort(r.date)} — ${sess.text}${r.room ? " in " + r.room : ""}? ${r.notes ? r.notes + " " : ""}Thanks, ${leader}`;
+  const smsText = `Hi${r.reliefStaffName ? " " + r.reliefStaffName.split(" ")[0] : ""}, can you cover ${r.absentStaffName} on ${fmtDateShort(r.date)} — ${sess.text}${r.room ? " in " + r.room : ""}?${classesShort ? ` Classes: ${classesShort}.` : ""} ${r.notes ? r.notes + " " : ""}Thanks, ${leaderFirst}`;
 
   const mailSubject = `Relief cover needed — ${r.absentStaffName} — ${fmtDateShort(r.date)}`;
-  const mailBody = `Hi${r.reliefStaffName ? " " + r.reliefStaffName.split(" ")[0] : ""},\n\n${r.absentStaffName} is away on ${fmtDateLong(r.date)} and needs cover for: ${sess.text}${r.room ? " in " + r.room : ""}.\n\nReason: ${r.reason || "—"}\n${r.notes ? "Notes: " + r.notes + "\n" : ""}\nPlease remember to attach the relief notes${r.notes ? "" : " (if the absent teacher has sent them)"} before sending this email — mailto links can't attach files automatically.\n\nThanks,\n${leader}\n${school}`;
+  const mailBody = `Hi${r.reliefStaffName ? " " + r.reliefStaffName.split(" ")[0] : ""},\n\n${r.absentStaffName} is away on ${fmtDateLong(r.date)} and needs cover for: ${sess.text}${r.room ? " in " + r.room : ""}.\n${classesLines ? "\nClasses to cover:\n" + classesLines + "\n" : ""}\nReason: ${r.reason || "—"}\n${r.notes ? "Notes: " + r.notes + "\n" : ""}\nPlease remember to attach the relief notes${r.notes ? "" : " (if the absent teacher has sent them)"} before sending this email — mailto links can't attach files automatically.\n\nThanks,\n${leaderFirst}\n${school}`;
   const mailto = `mailto:?subject=${encodeURIComponent(mailSubject)}&body=${encodeURIComponent(mailBody)}`;
 
   const contact = poolContactByName(r.reliefStaffName);
