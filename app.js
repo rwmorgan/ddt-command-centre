@@ -122,8 +122,8 @@ function defaultState(){
       { label: "Teams", url: "https://teams.microsoft.com/", icon: "teams", appScheme: "msteams://" },
       { label: "EduPoint", url: "", icon: "list" },
       { label: "Canvas", url: "", icon: "book" },
-      { label: "Staff Timetables", url: "", icon: "grid" },
-      { label: "TA Timetable", url: "", icon: "grid" },
+      { label: "Staff Timetables", url: "", icon: "grid", action: "showFullStaffTimetable" },
+      { label: "TA Timetable", url: "", icon: "grid", action: "showFullTaTimetable" },
       { label: "Unity3D", url: "https://unity.com/", icon: "cube", appScheme: "unityhub://" },
       { label: "Unreal / Epic Games", url: "https://www.unrealengine.com/", icon: "cube", appScheme: "com.epicgames.launcher://apps" },
       { label: "YouTube", url: "https://www.youtube.com/", icon: "play" },
@@ -152,6 +152,7 @@ function loadState(){
     backfillQuickLaunchSchemes(merged, def);
     correctKnownBadSchemes(merged);
     backfillFavorites(merged);
+    backfillQuickLaunchActions(merged, def);
     // Same class of gap as favourites/schemes above — data saved before
     // local-seed.js had a leaderName would otherwise be stuck showing the
     // "[Your name]" placeholder forever.
@@ -190,6 +191,18 @@ function backfillQuickLaunchSchemes(state, defaults){
     if(!q.appScheme){
       const match = defaults.quickLaunch.find(d => d.label.toLowerCase() === (q.label||"").toLowerCase() && d.appScheme);
       if(match) q.appScheme = match.appScheme;
+    }
+  });
+}
+/** Same idea as backfillQuickLaunchSchemes, for the in-app "action" tiles
+ * (Staff/TA timetables) added after those two tiles already existed as
+ * blank placeholders on saved data. */
+function backfillQuickLaunchActions(state, defaults){
+  if(!Array.isArray(state.quickLaunch)) return;
+  state.quickLaunch.forEach(q => {
+    if(!q.action){
+      const match = defaults.quickLaunch.find(d => d.label.toLowerCase() === (q.label||"").toLowerCase() && d.action);
+      if(match) q.action = match.action;
     }
   });
 }
@@ -688,6 +701,9 @@ function renderDashboard(){
 function renderQuickLaunch(){
   const box = document.getElementById("qgrid");
   box.innerHTML = state.quickLaunch.map((q,i) => {
+    if(q.action && typeof window[q.action] === "function"){
+      return `<button class="qtile" data-ql-action="${i}" title="Opens ${escapeHtml(q.label)}">${icon(q.icon||"globe")}<span>${escapeHtml(q.label)}</span></button>`;
+    }
     if(!q.url && !q.appScheme){
       return `<button class="qtile empty" data-ql-empty="${i}" title="No link set — edit in Settings">${icon(q.icon||"globe")}<span>${escapeHtml(q.label)}</span></button>`;
     }
@@ -697,6 +713,10 @@ function renderQuickLaunch(){
     return `<a class="qtile" href="${escapeHtml(q.url)}" target="_blank" rel="noopener">${icon(q.icon||"globe")}<span>${escapeHtml(q.label)}</span></a>`;
   }).join("");
 
+  box.querySelectorAll("[data-ql-action]").forEach(b => b.addEventListener("click", () => {
+    const q = state.quickLaunch[+b.dataset.qlAction];
+    window[q.action]();
+  }));
   box.querySelectorAll("[data-ql-empty]").forEach(b => b.addEventListener("click", () => showTab("settings")));
   box.querySelectorAll("[data-ql-app]").forEach(b => b.addEventListener("click", () => {
     const q = state.quickLaunch[+b.dataset.qlApp];
