@@ -73,7 +73,7 @@ function defaultState(){
       ],
       relief: {
         spreadsheetLocation: "Leadership Team (MS Teams) — relief/payment spreadsheet",
-        columns: ["Date","Absent Staff","Type","Session(s)","Line/Class","Relief Staff","Reason","Notes","Entered By","Approved for Pay"],
+        columns: ["Date","Absent Staff","Type","Session(s)","Line/Class","Relief Staff","Reason","Notes","Entered By"],
       },
       teamsChannel: "RON – All Staff  ›  Design and Digital Technology",
       // Blank = use the built-in SUPABASE_URL/SUPABASE_ANON_KEY above.
@@ -100,7 +100,7 @@ function defaultState(){
     },
     team: { teachers, tas },
     relief: {
-      log: [],   // {id,date,absentStaffId,absentStaffName,type,sessions:[idx],room,reliefStaffName,reason,notes,enteredForPay,createdAt}
+      log: [],   // {id,date,absentStaffId,absentStaffName,type,sessions:[idx],room,reliefStaffName,reason,notes,createdAt}
       // External relief pool — the people who actually cover absences (not your DDT team).
       // Shown at the TOP of every "who covered this" list, ahead of your own team.
       externalPool,
@@ -918,9 +918,6 @@ function renderRelief(){
             <label for="rf-notes">Notes (relief instructions, work set, etc.)</label>
             <textarea id="rf-notes" placeholder="What should the relief teacher know?"></textarea>
           </div>
-          <div class="field">
-            <label class="checkline"><input type="checkbox" id="rf-approved"> Approved for pay (spreadsheet entry made)</label>
-          </div>
           <button class="btn btn-primary" type="submit">${icon("plus")} Log absence</button>
         </form>
       </div>
@@ -1043,7 +1040,6 @@ function renderRelief(){
       reliefStaffName: document.getElementById("rf-relief").value.trim(),
       reason: document.getElementById("rf-reason").value,
       notes: document.getElementById("rf-notes").value.trim(),
-      enteredForPay: document.getElementById("rf-approved").checked,
       createdAt: new Date().toISOString(),
     };
     state.relief.log.unshift(record);
@@ -1185,12 +1181,11 @@ function renderReliefLog(filter=""){
     const sessLabel = r.type === "duty" ? "Duty" : r.type === "full-day" ? "Full day" : `S${(r.sessions||[]).map(i=>i+1).join(",")||"?"}`;
     return `<div class="item">
       <div class="item-main">
-        <div class="item-title">${escapeHtml(r.absentStaffName)} <span class="badge badge-flag">${escapeHtml(sessLabel)}</span> ${r.enteredForPay ? `<span class="badge badge-good">${icon("check")} Pay entered</span>` : `<span class="badge badge-amber">Pending pay entry</span>`}</div>
+        <div class="item-title">${escapeHtml(r.absentStaffName)} <span class="badge badge-flag">${escapeHtml(sessLabel)}</span></div>
         <div class="item-sub mono">${fmtDateShort(r.date)} · ${r.reliefStaffName ? "Relief: " + escapeHtml(r.reliefStaffName) : "No relief assigned"} · ${escapeHtml(r.reason||"")}${r.reliefStaffName ? contactLinksHtml(r.reliefStaffName) : ""}</div>
       </div>
       <div class="item-actions">
         <button class="btn btn-sm" data-out="${r.id}">${icon("copy")} Outputs</button>
-        <button class="btn btn-sm" data-pay="${r.id}">${r.enteredForPay ? "Unmark" : "Mark paid"}</button>
         <button class="btn btn-sm btn-danger" data-del="${r.id}">${icon("trash")}</button>
       </div>
     </div>`;
@@ -1199,10 +1194,6 @@ function renderReliefLog(filter=""){
   box.querySelectorAll("[data-out]").forEach(b => b.addEventListener("click", () => {
     const r = state.relief.log.find(x => x.id === b.dataset.out);
     if(r){ document.getElementById("reliefOutputCard").scrollIntoView({behavior:"smooth"}); openReliefOutputs(r); }
-  }));
-  box.querySelectorAll("[data-pay]").forEach(b => b.addEventListener("click", () => {
-    const r = state.relief.log.find(x => x.id === b.dataset.pay);
-    if(r){ r.enteredForPay = !r.enteredForPay; persist(); renderReliefLog(document.getElementById("reliefSearch").value); }
   }));
   box.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => {
     if(!confirm("Remove this relief entry? This cannot be undone.")) return;
@@ -1306,6 +1297,25 @@ function showTaTimetable(name){
 
 /** Every TA's coverage for the whole week, organised by day/session/line
  * — the "who's where" view, as opposed to one TA's own week. */
+/** Every teacher's classes for the whole week, organised by day/session/line
+ * — the "who's teaching what, where" view, parallel to showFullTaTimetable. */
+function showFullStaffTimetable(){
+  const body = DAY_ORDER.map(dayKey => {
+    const dayInfo = state.timetable.days[dayKey];
+    const times = state.timetable.times[dayInfo.kind];
+    const rows = times.map((t, i) => {
+      const entries = classGridFor(dayKey, i);
+      const isSG = /support group/i.test(dayInfo.lines[i]);
+      const cell = entries.length
+        ? entries.map(e => `${escapeHtml(e.teacher)} — ${escapeHtml(e.subject)}${e.room ? " (" + escapeHtml(e.room) + ")" : ""}`).join("<br>")
+        : (isSG ? `<span class="hint">Support Group</span>` : `<span class="hint">—</span>`);
+      return `<tr><td class="mono">${escapeHtml(t[0])}</td><td class="mono">${escapeHtml(t[1])}–${escapeHtml(t[2])}</td><td class="mono">${escapeHtml(dayInfo.lines[i])}</td><td>${cell}</td></tr>`;
+    }).join("");
+    return daySectionHtml(dayKey, rows, ["S","Time","Line","Teacher — Subject (Room)"]);
+  }).join("");
+  openTimetableModal("Staff timetable — whole week", body);
+}
+
 function showFullTaTimetable(){
   const body = DAY_ORDER.map(dayKey => {
     const dayInfo = state.timetable.days[dayKey];
@@ -1379,8 +1389,6 @@ function renderReliefStats(){
   entries.forEach(r => { if(r.reliefStaffName) byReliever[r.reliefStaffName] = (byReliever[r.reliefStaffName] || 0) + 1; });
   const topRelievers = Object.entries(byReliever).sort((a,b) => b[1] - a[1]).slice(0, 6);
 
-  const unpaid = entries.filter(r => !r.enteredForPay).length;
-
   const rowHtml = (label, count) => `
     <div class="item" style="padding:7px 10px;">
       <div class="item-main" style="display:flex; justify-content:space-between; align-items:center;">
@@ -1391,7 +1399,6 @@ function renderReliefStats(){
   box.innerHTML = `
     <div class="row" style="gap:10px; margin-bottom:14px;">
       <div class="stat-tile" style="flex:1;"><div class="stat-num mono">${entries.length}</div><div class="stat-label">Absences ${escapeHtml(scopeLabel)}</div></div>
-      <div class="stat-tile" style="flex:1;"><div class="stat-num mono" style="color:${unpaid ? "var(--flag)" : "inherit"}">${unpaid}</div><div class="stat-label">Pending pay entry</div></div>
       <div class="stat-tile" style="flex:1;"><div class="stat-num mono">${Object.keys(byReliever).length}</div><div class="stat-label">People covering</div></div>
     </div>
     <div class="grid grid-2">
@@ -1452,7 +1459,7 @@ function openReliefOutputs(r){
   const rowVals = {
     "Date": r.date, "Absent Staff": r.absentStaffName, "Type": r.type, "Session(s)": sess.text,
     "Line/Class": sess.lines.join("; "), "Relief Staff": r.reliefStaffName || "", "Reason": r.reason || "",
-    "Notes": r.notes || "", "Entered By": leader, "Approved for Pay": r.enteredForPay ? "Yes" : "",
+    "Notes": r.notes || "", "Entered By": leader,
   };
   const rowText = cols.map(c => rowVals[c] ?? "").join("\t");
   const headerText = cols.join("\t");
@@ -1939,7 +1946,10 @@ function renderTeamFiles(){
   root.innerHTML = `
     <div class="grid grid-2">
       <div class="card">
-        <div class="card-head"><h2>${icon("users")} Teachers</h2></div>
+        <div class="card-head">
+          <h2>${icon("users")} Teachers</h2>
+          <button class="btn btn-sm" id="viewFullStaffTimetableBtn">${icon("calendar")} Full staff timetable</button>
+        </div>
         <div id="teacherList" class="list"></div>
         <div class="row section-gap">
           <input type="text" id="newTeacher" placeholder="Add teacher name…" style="flex:1;">
@@ -2007,6 +2017,7 @@ function renderTeamFiles(){
     }));
   }
   renderStaffLists();
+  document.getElementById("viewFullStaffTimetableBtn").addEventListener("click", showFullStaffTimetable);
   document.getElementById("viewFullTaTimetableBtn").addEventListener("click", showFullTaTimetable);
 
   document.getElementById("addTeacherBtn").addEventListener("click", () => {
