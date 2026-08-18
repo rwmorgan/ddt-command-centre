@@ -877,7 +877,7 @@ function renderRelief(){
   root.innerHTML = `
     <div class="grid grid-2">
       <div class="card">
-        <div class="card-head"><h2>${icon("alert")} Log an absence</h2></div>
+        <div class="card-head"><h2 id="reliefFormHeading">${icon("alert")} Log an absence</h2><button type="button" class="btn btn-sm" id="reliefCancelEditBtn" style="display:none;">Cancel edit</button></div>
         <form id="reliefForm">
           <div class="row">
             <div class="field">
@@ -938,7 +938,7 @@ function renderRelief(){
             <label for="rf-notes">Notes (relief instructions, work set, etc.)</label>
             <textarea id="rf-notes" placeholder="What should the relief teacher know?"></textarea>
           </div>
-          <button class="btn btn-primary" type="submit">${icon("plus")} Log absence</button>
+          <button class="btn btn-primary" type="submit" id="reliefSubmitBtn">${icon("plus")} Log absence</button>
         </form>
       </div>
 
@@ -1044,14 +1044,26 @@ function renderRelief(){
   renderSessionCheckboxes();
   renderClassesPanel();
 
+  function resetReliefFormToAddMode(){
+    reliefEditingId = null;
+    document.getElementById("reliefFormHeading").innerHTML = `${icon("alert")} Log an absence`;
+    document.getElementById("reliefSubmitBtn").innerHTML = `${icon("plus")} Log absence`;
+    document.getElementById("reliefCancelEditBtn").style.display = "none";
+    document.getElementById("reliefForm").reset();
+    staffSel.dispatchEvent(new Event("change"));
+    dateInput.value = todayISO();
+    renderSessionCheckboxes();
+    renderClassesPanel();
+  }
+  document.getElementById("reliefCancelEditBtn").addEventListener("click", resetReliefFormToAddMode);
+
   document.getElementById("reliefForm").addEventListener("submit", e => {
     e.preventDefault();
     const staffVal = staffSel.value === "__other" ? document.getElementById("rf-staff-other").value.trim() : staffSel.value;
     if(!staffVal){ toast("Choose or enter an absent staff member."); return; }
     const type = typeSel.value;
     const sessions = type === "sessions" ? [...document.querySelectorAll(".rf-sess-cb:checked")].map(cb=>+cb.value) : [];
-    const record = {
-      id: uid(),
+    const fields = {
       date: dateInput.value,
       absentStaffName: staffVal,
       type,
@@ -1060,8 +1072,24 @@ function renderRelief(){
       reliefStaffName: document.getElementById("rf-relief").value.trim(),
       reason: document.getElementById("rf-reason").value,
       notes: document.getElementById("rf-notes").value.trim(),
-      createdAt: new Date().toISOString(),
     };
+
+    if(reliefEditingId){
+      const existing = state.relief.log.find(x => x.id === reliefEditingId);
+      if(existing){
+        Object.assign(existing, fields);
+        persist();
+        toast("Relief entry updated.");
+        resetReliefFormToAddMode();
+        renderRelief();
+        openReliefOutputs(existing);
+        document.getElementById("reliefOutputCard").scrollIntoView({behavior:"smooth"});
+        return;
+      }
+      reliefEditingId = null;
+    }
+
+    const record = { id: uid(), ...fields, createdAt: new Date().toISOString() };
     state.relief.log.unshift(record);
     persist();
     toast("Absence logged.");
@@ -1206,6 +1234,7 @@ function renderReliefLog(filter=""){
       </div>
       <div class="item-actions">
         <button class="btn btn-sm" data-out="${r.id}">${icon("copy")} Outputs</button>
+        <button class="btn btn-sm" data-edit="${r.id}">${icon("edit")} Edit</button>
         <button class="btn btn-sm btn-danger" data-del="${r.id}">${icon("trash")}</button>
       </div>
     </div>`;
@@ -1215,11 +1244,49 @@ function renderReliefLog(filter=""){
     const r = state.relief.log.find(x => x.id === b.dataset.out);
     if(r){ document.getElementById("reliefOutputCard").scrollIntoView({behavior:"smooth"}); openReliefOutputs(r); }
   }));
+  box.querySelectorAll("[data-edit]").forEach(b => b.addEventListener("click", () => {
+    const r = state.relief.log.find(x => x.id === b.dataset.edit);
+    if(r) populateReliefFormForEdit(r);
+  }));
   box.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => {
     if(!confirm("Remove this relief entry? This cannot be undone.")) return;
     state.relief.log = state.relief.log.filter(x => x.id !== b.dataset.del);
     persist(); renderReliefLog(); renderReliefPool();
   }));
+}
+
+/** Fills the "Log an absence" form with an existing entry's values and
+ * switches it into edit mode - reuses the same form/validation as adding
+ * a new one, so editing gets every field (including the classes panel and
+ * suggested-relief chips) for free. */
+function populateReliefFormForEdit(r){
+  showTab("relief");
+  reliefEditingId = r.id;
+
+  const staffSel = document.getElementById("rf-staff");
+  const isKnownStaff = [...staffSel.options].some(o => o.value === r.absentStaffName);
+  staffSel.value = isKnownStaff ? r.absentStaffName : "__other";
+  staffSel.dispatchEvent(new Event("change"));
+  if(!isKnownStaff) document.getElementById("rf-staff-other").value = r.absentStaffName;
+
+  document.getElementById("rf-date").value = r.date;
+  document.getElementById("rf-type").value = r.type;
+  document.getElementById("rf-type").dispatchEvent(new Event("change"));
+  (r.sessions || []).forEach(i => {
+    const cb = document.querySelector(`.rf-sess-cb[value="${i}"]`);
+    if(cb) cb.checked = true;
+  });
+
+  document.getElementById("rf-room").value = r.room || "";
+  document.getElementById("rf-relief").value = r.reliefStaffName || "";
+  document.getElementById("rf-reason").value = r.reason || "Personal / sick leave";
+  document.getElementById("rf-notes").value = r.notes || "";
+
+  document.getElementById("reliefFormHeading").innerHTML = `${icon("edit")} Edit absence`;
+  document.getElementById("reliefSubmitBtn").innerHTML = `${icon("check")} Save changes`;
+  document.getElementById("reliefCancelEditBtn").style.display = "";
+
+  document.getElementById("reliefForm").scrollIntoView({ behavior: "smooth" });
 }
 
 /** classGrid/taGrid use a "real teaching session" index that skips
