@@ -931,6 +931,9 @@ function renderRelief(){
               <option>Professional learning</option>
               <option>Exam marking</option>
               <option>Approved leave</option>
+              <option>Carers</option>
+              <option>Bereavement</option>
+              <option>LWOP</option>
               <option>Other</option>
             </select>
           </div>
