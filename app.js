@@ -1228,6 +1228,10 @@ function renderReliefLog(filter=""){
 
   if(!entries.length){ box.innerHTML = `<div class="empty-state">${icon("inbox")}<div>No relief entries yet. Log an absence above to get started.</div></div>`; return; }
 
+  // Newest date first, oldest date at the bottom -- dates are ISO
+  // (YYYY-MM-DD) strings so a plain string comparison sorts chronologically.
+  entries = entries.slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+
   box.innerHTML = `<div class="list">${entries.map(r => {
     const sessLabel = r.type === "duty" ? "Duty" : r.type === "full-day" ? "Full day" : `S${(r.sessions||[]).map(i=>i+1).join(",")||"?"}`;
     return `<div class="item">
