@@ -360,6 +360,12 @@ tr:last-child td { border-bottom: none; }
 }
 [data-theme="console"] #toast { background: var(--accent); color: var(--accent-ink); }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+#toast.has-action { pointer-events: auto; }
+.toast-action {
+  margin-left: 4px; text-decoration: underline; text-underline-offset: 2px;
+  font-weight: 700; color: inherit; opacity: .9;
+}
+.toast-action:hover { opacity: 1; }
 
 /* ---------- modal ---------- */
 .modal-backdrop {

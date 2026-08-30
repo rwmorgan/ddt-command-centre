@@ -504,12 +504,27 @@ function launchApp(label, scheme, webUrl){
 /* ---------------------------------------------------------------------- */
 /* Toast                                                                  */
 /* ---------------------------------------------------------------------- */
-function toast(msg){
+/** Plain toast by default. Pass {actionLabel, onAction} (e.g. an "Undo"
+ * button after a delete) to show a clickable action inside it instead --
+ * the toast stays up longer in that case so there's a real chance to use it. */
+function toast(msg, opts){
   const el = document.getElementById("toast");
-  el.textContent = msg;
-  el.classList.add("show");
   clearTimeout(toast._t);
-  toast._t = setTimeout(() => el.classList.remove("show"), 2200);
+  if(opts && opts.actionLabel && opts.onAction){
+    el.innerHTML = `<span>${escapeHtml(msg)}</span> <button type="button" class="toast-action">${escapeHtml(opts.actionLabel)}</button>`;
+    el.classList.add("show", "has-action");
+    el.querySelector(".toast-action").addEventListener("click", () => {
+      clearTimeout(toast._t);
+      el.classList.remove("show", "has-action");
+      opts.onAction();
+    });
+    toast._t = setTimeout(() => el.classList.remove("show", "has-action"), opts.duration || 6000);
+  } else {
+    el.textContent = msg;
+    el.classList.remove("has-action");
+    el.classList.add("show");
+    toast._t = setTimeout(() => el.classList.remove("show"), 2200);
+  }
 }
 
 /* ---------------------------------------------------------------------- */
@@ -912,6 +927,10 @@ function renderRelief(){
               </select>
             </div>
           </div>
+          <div class="field" id="rf-end-wrap" style="display:none;">
+            <label for="rf-end-date">End date (optional — logs each school day in the range)</label>
+            <input type="date" id="rf-end-date">
+          </div>
           <div class="field" id="rf-sessions-wrap">
             <label>Session(s) affected</label>
             <div id="rf-sessions" class="row" style="gap:14px;"></div>
@@ -985,8 +1004,21 @@ function renderRelief(){
         <h2>Relief log</h2>
         <div class="row" style="gap:8px;">
           <button class="btn btn-sm" id="printTodayBtn">${icon("print")} Print today's coverage</button>
+          <button class="btn btn-sm" id="exportReliefCsvBtn">${icon("export")} Export CSV</button>
           <input type="search" id="reliefSearch" placeholder="Search log…" style="max-width:220px;">
         </div>
+      </div>
+      <div class="row" style="gap:10px; align-items:flex-end; margin-bottom:12px;">
+        <div class="field" style="margin:0;">
+          <label for="reliefFromDate" class="hint">From</label>
+          <input type="date" id="reliefFromDate">
+        </div>
+        <div class="field" style="margin:0;">
+          <label for="reliefToDate" class="hint">To</label>
+          <input type="date" id="reliefToDate">
+        </div>
+        <button class="btn btn-sm btn-ghost" id="reliefClearDateFilter">Clear dates</button>
+        <div class="hint">Export CSV downloads whatever's shown below — set a date range first for a term's worth of records.</div>
       </div>
       <div id="reliefLog"></div>
     </div>
@@ -1005,7 +1037,17 @@ function renderRelief(){
 
   const dateInput = document.getElementById("rf-date");
   const typeSel = document.getElementById("rf-type");
+  /** The "log a run of days" end-date field only makes sense for a fresh
+   * "Full teaching day" absence -- hidden (and cleared) while editing an
+   * existing entry, since editing always applies to that one record. */
+  function updateEndDateVisibility(){
+    const endWrap = document.getElementById("rf-end-wrap");
+    const show = typeSel.value === "full-day" && !reliefEditingId;
+    endWrap.style.display = show ? "" : "none";
+    if(!show) document.getElementById("rf-end-date").value = "";
+  }
   function renderSessionCheckboxes(){
+    updateEndDateVisibility();
     const dayKey = dayKeyFromISO(dateInput.value);
     const wrap = document.getElementById("rf-sessions-wrap");
     const box = document.getElementById("rf-sessions");
@@ -1157,6 +1199,39 @@ function renderRelief(){
       reliefEditingId = null;
     }
 
+    // Multi-day: "Full teaching day" only, and only when logging fresh (not
+    // editing) -- one identical record per school day in the range, so every
+    // day stays individually editable/deletable exactly like a normal entry.
+    const endDateInput = document.getElementById("rf-end-date");
+    const endDateVal = (type === "full-day" && endDateInput) ? endDateInput.value : "";
+    if(endDateVal && endDateVal > fields.date){
+      const dates = [];
+      const d = new Date(fields.date + "T00:00:00");
+      const end = new Date(endDateVal + "T00:00:00");
+      while(d <= end){
+        const iso = todayISO(d); // local-date formatting -- toISOString() would shift through UTC and land on the wrong day in AEST
+        if(dayKeyFromISO(iso)) dates.push(iso); // skips weekends
+        d.setDate(d.getDate()+1);
+      }
+      if(!dates.length){ toast("No school days in that date range."); return; }
+      const records = dates.map(iso => ({ id: uid(), ...fields, date: iso, createdAt: new Date().toISOString() }));
+      state.relief.log.unshift(...records);
+      persist();
+      toast(`${records.length} absence${records.length>1?"s":""} logged, ${fmtDateShort(dates[0])}–${fmtDateShort(dates[dates.length-1])}.`);
+      renderRelief();
+      openReliefOutputs(records[0]);
+      document.getElementById("reliefOutputCard").scrollIntoView({behavior:"smooth"});
+      return;
+    }
+
+    // Same person + same date already has an entry -- most often an
+    // accidental double-log, so check before creating a genuine duplicate.
+    const dupes = state.relief.log.filter(x => x.absentStaffName === staffVal && x.date === fields.date);
+    if(dupes.length){
+      const dupeSummary = dupes.map(x => x.type === "duty" ? "Duty" : x.type === "full-day" ? "Full day" : sessionLabelList(x.sessions)).join(", ");
+      if(!confirm(`${staffVal} already has a relief entry logged for ${fmtDateShort(fields.date)} (${dupeSummary}). Log this anyway?`)) return;
+    }
+
     const record = { id: uid(), ...fields, createdAt: new Date().toISOString() };
     state.relief.log.unshift(record);
     persist();
@@ -1173,7 +1248,15 @@ function renderRelief(){
   renderReliefPool();
   renderReliefLog();
 
-  document.getElementById("reliefSearch").addEventListener("input", e => renderReliefLog(e.target.value));
+  document.getElementById("reliefSearch").addEventListener("input", () => renderReliefLog());
+  document.getElementById("reliefFromDate").addEventListener("change", () => renderReliefLog());
+  document.getElementById("reliefToDate").addEventListener("change", () => renderReliefLog());
+  document.getElementById("reliefClearDateFilter").addEventListener("click", () => {
+    document.getElementById("reliefFromDate").value = "";
+    document.getElementById("reliefToDate").value = "";
+    renderReliefLog();
+  });
+  document.getElementById("exportReliefCsvBtn").addEventListener("click", exportReliefLogCsv);
   document.getElementById("reliefDirSearch").addEventListener("input", e => renderReliefPool(e.target.value));
 }
 
@@ -1285,19 +1368,35 @@ function renderSubjectChips(container, tags, selectedSet, onChange){
   if(clearBtn) clearBtn.addEventListener("click", () => { selectedSet.clear(); onChange(); });
 }
 
-function renderReliefLog(filter=""){
-  const box = document.getElementById("reliefLog");
-  const f = filter.trim().toLowerCase();
+/** The relief log entries currently matching the search text + date-range
+ * filters (if any active) -- shared by the on-screen log list and CSV
+ * export, so "export what's shown" genuinely exports what's shown. */
+function filteredReliefEntries(){
+  const f = (document.getElementById("reliefSearch")?.value || "").trim().toLowerCase();
+  const from = document.getElementById("reliefFromDate")?.value || "";
+  const to = document.getElementById("reliefToDate")?.value || "";
   let entries = state.relief.log;
   if(f) entries = entries.filter(r => `${r.absentStaffName} ${allRelieverNames(r).join(" ")} ${r.reason} ${r.notes}`.toLowerCase().includes(f));
+  if(from) entries = entries.filter(r => r.date >= from);
+  if(to) entries = entries.filter(r => r.date <= to);
+  return entries;
+}
 
-  if(!entries.length){ box.innerHTML = `<div class="empty-state">${icon("inbox")}<div>No relief entries yet. Log an absence above to get started.</div></div>`; return; }
+function renderReliefLog(){
+  const box = document.getElementById("reliefLog");
+  const entries = filteredReliefEntries();
+  const filtersActive = !!(document.getElementById("reliefSearch")?.value.trim() || document.getElementById("reliefFromDate")?.value || document.getElementById("reliefToDate")?.value);
+
+  if(!entries.length){
+    box.innerHTML = `<div class="empty-state">${icon("inbox")}<div>${filtersActive ? "No entries match your search or date filter." : "No relief entries yet. Log an absence above to get started."}</div></div>`;
+    return;
+  }
 
   // Newest date first, oldest date at the bottom -- dates are ISO
   // (YYYY-MM-DD) strings so a plain string comparison sorts chronologically.
-  entries = entries.slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const sorted = entries.slice().sort((a, b) => (b.date || "").localeCompare(a.date || ""));
 
-  box.innerHTML = `<div class="list">${entries.map(r => {
+  box.innerHTML = `<div class="list">${sorted.map(r => {
     const sessLabel = r.type === "duty" ? "Duty" : r.type === "full-day" ? "Full day" : `S${(r.sessions||[]).map(i=>i+1).join(",")||"?"}`;
     return `<div class="item">
       <div class="item-main">
@@ -1321,10 +1420,44 @@ function renderReliefLog(filter=""){
     if(r) populateReliefFormForEdit(r);
   }));
   box.querySelectorAll("[data-del]").forEach(b => b.addEventListener("click", () => {
-    if(!confirm("Remove this relief entry? This cannot be undone.")) return;
-    state.relief.log = state.relief.log.filter(x => x.id !== b.dataset.del);
-    persist(); renderReliefLog(); renderReliefPool();
+    if(!confirm("Remove this relief entry?")) return;
+    const removedIdx = state.relief.log.findIndex(x => x.id === b.dataset.del);
+    if(removedIdx === -1) return;
+    const [removed] = state.relief.log.splice(removedIdx, 1);
+    persist(); renderReliefLog(); renderReliefPool(); renderReliefStats();
+    toast("Relief entry removed.", { actionLabel: "Undo", onAction: () => {
+      state.relief.log.splice(Math.min(removedIdx, state.relief.log.length), 0, removed);
+      persist(); renderReliefLog(); renderReliefPool(); renderReliefStats();
+      toast("Restored.");
+    }});
   }));
+}
+
+/** Wraps a CSV field in quotes and escapes internal quotes, but only when
+ * the value actually needs it (contains a comma, quote, or line break). */
+function csvField(val){
+  const s = String(val ?? "");
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+}
+
+/** Downloads whatever's currently shown in the relief log (respecting the
+ * search text + date-range filters) as a CSV -- oldest first, since that
+ * reads better as a term/year record than the log's on-screen newest-first
+ * order. Uses the same column set as Settings' relief spreadsheet columns. */
+function exportReliefLogCsv(){
+  const entries = filteredReliefEntries().slice().sort((a,b) => (a.date||"").localeCompare(b.date||""));
+  if(!entries.length){ toast("No relief entries to export."); return; }
+  const leader = state.meta.leaderName || "";
+  const cols = state.settings.relief.columns;
+  const rows = entries.map(r => { const v = reliefRowValues(r, leader); return cols.map(c => v[c] ?? ""); });
+  const csv = [cols, ...rows].map(row => row.map(csvField).join(",")).join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `relief-log-${todayISO()}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  toast(`Exported ${entries.length} ${entries.length === 1 ? "entry" : "entries"} to CSV.`);
 }
 
 /** Fills the "Log an absence" form with an existing entry's values and
@@ -1548,6 +1681,18 @@ function sessionDescriptionFor(r){
   return { text: parts.join(", "), lines: idxs.map(i => dayInfo.lines[i]) };
 }
 
+/** The named-column values for one relief entry, keyed exactly like
+ * state.settings.relief.columns -- shared by the per-entry "Spreadsheet
+ * row" output and the whole-log CSV export so both stay in sync. */
+function reliefRowValues(r, leader){
+  const sess = sessionDescriptionFor(r);
+  return {
+    "Date": r.date, "Absent Staff": r.absentStaffName, "Type": r.type, "Session(s)": sess.text,
+    "Line/Class": sess.lines.join("; "), "Relief Staff": reliefSummaryText(r), "Reason": r.reason || "",
+    "Notes": r.notes || "", "Entered By": leader,
+  };
+}
+
 /** One consolidated page for every absence today — for the staffroom wall
  * or front office, distinct from the per-absence cover sheet. */
 function printTodaysCoverage(){
@@ -1684,11 +1829,7 @@ function openReliefOutputs(r){
   // Whole-absence data (spreadsheet row + cover sheet describe every
   // reliever at once, regardless of which one's message is being drafted).
   const cols = state.settings.relief.columns;
-  const rowVals = {
-    "Date": r.date, "Absent Staff": r.absentStaffName, "Type": r.type, "Session(s)": fullSess.text,
-    "Line/Class": fullSess.lines.join("; "), "Relief Staff": summaryName, "Reason": r.reason || "",
-    "Notes": r.notes || "", "Entered By": leader,
-  };
+  const rowVals = reliefRowValues(r, leader);
   const rowText = cols.map(c => rowVals[c] ?? "").join("\t");
   const headerText = cols.join("\t");
   const coverText = `RELIEF COVER SHEET\n\nAbsent: ${r.absentStaffName}\nDate: ${fmtDateLong(r.date)}\nSessions: ${fullSess.text}${r.room ? "\nRoom: " + r.room : ""}\nRelief: ${summaryName || "TBC"}\n\nNotes:\n${r.notes || "(attach relief notes / work set if provided by absent teacher)"}\n\nReminder: print a class list for each session from EduPoint.`;
@@ -2169,7 +2310,15 @@ function renderTaskList(){
     t.status = cb.checked ? "done" : "open"; persist(); renderTaskList();
   }));
   box.querySelectorAll("[data-del-task]").forEach(b => b.addEventListener("click", () => {
-    state.tasks = state.tasks.filter(x=>x.id!==b.dataset.delTask); persist(); renderTaskList();
+    const removedIdx = state.tasks.findIndex(x => x.id === b.dataset.delTask);
+    if(removedIdx === -1) return;
+    const [removed] = state.tasks.splice(removedIdx, 1);
+    persist(); renderTaskList();
+    toast("Task removed.", { actionLabel: "Undo", onAction: () => {
+      state.tasks.splice(Math.min(removedIdx, state.tasks.length), 0, removed);
+      persist(); renderTaskList();
+      toast("Restored.");
+    }});
   }));
 }
 
