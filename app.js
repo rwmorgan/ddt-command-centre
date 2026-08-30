@@ -100,7 +100,12 @@ function defaultState(){
     },
     team: { teachers, tas },
     relief: {
-      log: [],   // {id,date,absentStaffId,absentStaffName,type,sessions:[idx],room,reliefStaffName,reason,notes,createdAt}
+      log: [],   // {id,date,absentStaffId,absentStaffName,type,sessions:[idx],room,reliefStaffName,relievers:[{name,sessions:[idx]}],reason,notes,createdAt}
+      // reliefStaffName is the single/default reliever (the common case).
+      // relievers is only populated when coverage is split across different
+      // people for different sessions of a "specific session(s)" absence --
+      // see relieverGroupsFor() below, which is the one place that should
+      // read either field so every other call site stays split-aware for free.
       // External relief pool — the people who actually cover absences (not your DDT team).
       // Shown at the TOP of every "who covered this" list, ahead of your own team.
       externalPool,
@@ -760,7 +765,7 @@ function reliefItemHtml(r){
   return `<div class="item">
     <div class="item-main">
       <div class="item-title">${escapeHtml(r.absentStaffName)} <span class="badge badge-flag">${escapeHtml(sessLabel)}</span></div>
-      <div class="item-sub">${r.reliefStaffName ? "Covered by " + escapeHtml(r.reliefStaffName) + contactLinksHtml(r.reliefStaffName) : "No relief assigned yet"}</div>
+      <div class="item-sub">${reliefSummaryText(r) ? "Covered by " + escapeHtml(reliefSummaryText(r)) + (allRelieverNames(r).length === 1 ? contactLinksHtml(allRelieverNames(r)[0]) : "") : "No relief assigned yet"}</div>
     </div>
   </div>`;
 }
@@ -918,12 +923,16 @@ function renderRelief(){
               <label for="rf-room">Room (optional)</label>
               <input type="text" id="rf-room" placeholder="e.g. D12">
             </div>
-            <div class="field">
+            <div class="field" id="rf-relief-single-wrap">
               <label for="rf-relief">Relief staff assigned (optional)</label>
               <input type="text" id="rf-relief" list="rf-pool-list" placeholder="Start typing a name… (relief pool first, then your team)">
               <datalist id="rf-pool-list">${reliefCandidateNames().map(n=>`<option value="${escapeHtml(n)}">`).join("")}</datalist>
             </div>
           </div>
+          <div class="field" id="rf-split-wrap" style="display:none;">
+            <label class="checkline"><input type="checkbox" id="rf-split-relief"> Split coverage — different relief for different sessions</label>
+          </div>
+          <div id="rf-session-relievers"></div>
           <div class="field">
             <label for="rf-reason">Reason</label>
             <select id="rf-reason">
@@ -934,6 +943,7 @@ function renderRelief(){
               <option>Carers</option>
               <option>Bereavement</option>
               <option>LWOP</option>
+              <option>LSL</option>
               <option>Other</option>
             </select>
           </div>
@@ -1000,13 +1010,47 @@ function renderRelief(){
     const wrap = document.getElementById("rf-sessions-wrap");
     const box = document.getElementById("rf-sessions");
     if(typeSel.value !== "sessions" || !dayKey){
-      wrap.style.display = "none"; box.innerHTML = ""; return;
+      wrap.style.display = "none"; box.innerHTML = "";
+      renderSessionRelieverInputs();
+      return;
     }
     wrap.style.display = "";
     const dayInfo = state.timetable.days[dayKey];
     const times = state.timetable.times[dayInfo.kind];
     box.innerHTML = times.map((t,i) => `
       <label class="checkline"><input type="checkbox" class="rf-sess-cb" value="${i}"> ${escapeHtml(t[0])} · ${escapeHtml(dayInfo.lines[i])}</label>
+    `).join("");
+    renderSessionRelieverInputs();
+  }
+  /** Shows/hides the "split coverage" checkbox (only relevant once 2+
+   * sessions are checked on a "specific session(s)" absence) and, when
+   * ticked, swaps the single "Relief staff assigned" field for one
+   * relief-name input per checked session so different people can cover
+   * different sessions of the same absence. */
+  function renderSessionRelieverInputs(){
+    const splitWrap = document.getElementById("rf-split-wrap");
+    const splitCb = document.getElementById("rf-split-relief");
+    const singleWrap = document.getElementById("rf-relief-single-wrap");
+    const out = document.getElementById("rf-session-relievers");
+    const checkedSessions = [...document.querySelectorAll(".rf-sess-cb:checked")].map(cb=>+cb.value).sort((a,b)=>a-b);
+    const canSplit = typeSel.value === "sessions" && checkedSessions.length > 1;
+    splitWrap.style.display = canSplit ? "" : "none";
+    if(!canSplit) splitCb.checked = false;
+    const splitting = canSplit && splitCb.checked;
+    singleWrap.style.display = splitting ? "none" : "";
+    if(!splitting){ out.style.display = "none"; out.innerHTML = ""; return; }
+
+    const dayKey = dayKeyFromISO(dateInput.value);
+    const dayInfo = state.timetable.days[dayKey];
+    const times = state.timetable.times[dayInfo.kind];
+    const existing = {};
+    out.querySelectorAll("[data-sess-relief]").forEach(inp => { existing[inp.dataset.sessRelief] = inp.value; });
+    out.style.display = "";
+    out.innerHTML = `<div class="hint" style="margin:2px 0 8px;">Who's covering each session:</div>` + checkedSessions.map(i => `
+      <div class="field">
+        <label>S${i+1} · ${escapeHtml(times[i][0])} · ${escapeHtml(dayInfo.lines[i])}</label>
+        <input type="text" data-sess-relief="${i}" list="rf-pool-list" value="${escapeHtml(existing[i]||"")}" placeholder="Relief for this session">
+      </div>
     `).join("");
   }
   /** Shows what the selected absent teacher actually teaches that day
@@ -1044,6 +1088,10 @@ function renderRelief(){
   }
   dateInput.addEventListener("change", () => { renderSessionCheckboxes(); renderClassesPanel(); });
   typeSel.addEventListener("change", renderSessionCheckboxes);
+  document.getElementById("rf-sessions").addEventListener("change", e => {
+    if(e.target.classList.contains("rf-sess-cb")) renderSessionRelieverInputs();
+  });
+  document.getElementById("rf-split-relief").addEventListener("change", renderSessionRelieverInputs);
   renderSessionCheckboxes();
   renderClassesPanel();
 
@@ -1066,13 +1114,30 @@ function renderRelief(){
     if(!staffVal){ toast("Choose or enter an absent staff member."); return; }
     const type = typeSel.value;
     const sessions = type === "sessions" ? [...document.querySelectorAll(".rf-sess-cb:checked")].map(cb=>+cb.value) : [];
+
+    // Split coverage: one relief-name input per checked session, merged into
+    // {name, sessions} groups (so two sessions given the same name become
+    // one group, e.g. "Jane Smith (S2,3)" rather than two separate entries).
+    const splitCb = document.getElementById("rf-split-relief");
+    const splitting = type === "sessions" && splitCb && splitCb.checked;
+    let relievers = [];
+    if(splitting){
+      const bySession = [...document.querySelectorAll("#rf-session-relievers [data-sess-relief]")]
+        .map(inp => ({ session: +inp.dataset.sessRelief, name: inp.value.trim() }))
+        .filter(x => x.name);
+      const merged = {};
+      bySession.forEach(({session, name}) => { (merged[name] = merged[name] || []).push(session); });
+      relievers = Object.keys(merged).map(name => ({ name, sessions: merged[name].sort((a,b)=>a-b) }));
+    }
+
     const fields = {
       date: dateInput.value,
       absentStaffName: staffVal,
       type,
       sessions,
       room: document.getElementById("rf-room").value.trim(),
-      reliefStaffName: document.getElementById("rf-relief").value.trim(),
+      reliefStaffName: splitting ? (relievers.length === 1 ? relievers[0].name : "") : document.getElementById("rf-relief").value.trim(),
+      relievers,
       reason: document.getElementById("rf-reason").value,
       notes: document.getElementById("rf-notes").value.trim(),
     };
@@ -1118,7 +1183,7 @@ function renderReliefPool(filter=""){
   const f = filter.trim().toLowerCase();
 
   let pool = reliefCandidateObjects().map(c => {
-    const uses = state.relief.log.filter(r => r.reliefStaffName === c.name);
+    const uses = state.relief.log.filter(r => allRelieverNames(r).includes(c.name));
     const last = uses.map(u=>u.date).sort().pop();
     return { ...c, ...splitName(c.name), count: uses.length, last };
   });
@@ -1224,7 +1289,7 @@ function renderReliefLog(filter=""){
   const box = document.getElementById("reliefLog");
   const f = filter.trim().toLowerCase();
   let entries = state.relief.log;
-  if(f) entries = entries.filter(r => `${r.absentStaffName} ${r.reliefStaffName} ${r.reason} ${r.notes}`.toLowerCase().includes(f));
+  if(f) entries = entries.filter(r => `${r.absentStaffName} ${allRelieverNames(r).join(" ")} ${r.reason} ${r.notes}`.toLowerCase().includes(f));
 
   if(!entries.length){ box.innerHTML = `<div class="empty-state">${icon("inbox")}<div>No relief entries yet. Log an absence above to get started.</div></div>`; return; }
 
@@ -1237,7 +1302,7 @@ function renderReliefLog(filter=""){
     return `<div class="item">
       <div class="item-main">
         <div class="item-title">${escapeHtml(r.absentStaffName)} <span class="badge badge-flag">${escapeHtml(sessLabel)}</span></div>
-        <div class="item-sub mono">${fmtDateShort(r.date)} · ${r.reliefStaffName ? "Relief: " + escapeHtml(r.reliefStaffName) : "No relief assigned"} · ${escapeHtml(r.reason||"")}${r.reliefStaffName ? contactLinksHtml(r.reliefStaffName) : ""}</div>
+        <div class="item-sub mono">${fmtDateShort(r.date)} · ${reliefSummaryText(r) ? "Relief: " + escapeHtml(reliefSummaryText(r)) : "No relief assigned"} · ${escapeHtml(r.reason||"")}${allRelieverNames(r).length === 1 ? contactLinksHtml(allRelieverNames(r)[0]) : ""}</div>
       </div>
       <div class="item-actions">
         <button class="btn btn-sm" data-out="${r.id}">${icon("copy")} Outputs</button>
@@ -1281,11 +1346,23 @@ function populateReliefFormForEdit(r){
   document.getElementById("rf-type").dispatchEvent(new Event("change"));
   (r.sessions || []).forEach(i => {
     const cb = document.querySelector(`.rf-sess-cb[value="${i}"]`);
-    if(cb) cb.checked = true;
+    if(cb){ cb.checked = true; cb.dispatchEvent(new Event("change", {bubbles:true})); }
   });
 
   document.getElementById("rf-room").value = r.room || "";
-  document.getElementById("rf-relief").value = r.reliefStaffName || "";
+  const hasSplit = !!(r.relievers && r.relievers.length);
+  document.getElementById("rf-relief").value = hasSplit ? "" : (r.reliefStaffName || "");
+  const splitCb = document.getElementById("rf-split-relief");
+  if(splitCb){
+    splitCb.checked = hasSplit;
+    splitCb.dispatchEvent(new Event("change", {bubbles:true}));
+    if(hasSplit){
+      r.relievers.forEach(g => (g.sessions||[]).forEach(i => {
+        const inp = document.querySelector(`[data-sess-relief="${i}"]`);
+        if(inp) inp.value = g.name;
+      }));
+    }
+  }
   document.getElementById("rf-reason").value = r.reason || "Personal / sick leave";
   document.getElementById("rf-notes").value = r.notes || "";
 
@@ -1425,6 +1502,40 @@ function showFullTaTimetable(){
   openTimetableModal("TA timetable — whole week", body);
 }
 
+/** Normalises a relief log entry's assigned reliever(s) into a uniform
+ * list of {name, sessions} groups -- the one place every other function
+ * should go through, so they all stay aware of split coverage for free.
+ * Most entries are just one person covering the whole absence (from
+ * reliefStaffName); the optional relievers[] array lets different people
+ * cover different sessions of the same "specific session(s)" absence. */
+function relieverGroupsFor(r){
+  if(r.relievers && r.relievers.length) return r.relievers.filter(g => g.name);
+  if(r.reliefStaffName) return [{ name: r.reliefStaffName, sessions: r.sessions || [] }];
+  return [];
+}
+
+/** Every distinct reliever name on an absence, split or not -- used for
+ * search, "who's covering most" stats, and the relief pool's
+ * least-recently-used sort/use-count. */
+function allRelieverNames(r){
+  return [...new Set(relieverGroupsFor(r).map(g => g.name))];
+}
+
+/** "S1" / "S2,3" style label for a set of session indices (1-based, sorted). */
+function sessionLabelList(sessions){
+  if(!sessions || !sessions.length) return "?";
+  return "S" + sessions.slice().sort((a,b)=>a-b).map(i=>i+1).join(",");
+}
+
+/** Human-readable "who's covering what": just a name for the common single
+ * -reliever case, or "Jo Bloggs (S1), Jane Smith (S2,3)" when split. */
+function reliefSummaryText(r){
+  const groups = relieverGroupsFor(r);
+  if(!groups.length) return "";
+  if(!(r.relievers && r.relievers.length)) return groups[0].name;
+  return groups.map(g => `${g.name} (${sessionLabelList(g.sessions)})`).join(", ");
+}
+
 function sessionDescriptionFor(r){
   const dayKey = dayKeyFromISO(r.date);
   if(!dayKey) return { text: "", lines: [] };
@@ -1451,7 +1562,7 @@ function printTodaysCoverage(){
         <tr><th>Absent</th><th>Sessions</th><th>Relief</th><th>Room</th><th>Notes</th></tr>
         ${entries.map(r => {
           const sess = sessionDescriptionFor(r);
-          return `<tr><td>${escapeHtml(r.absentStaffName)}</td><td>${escapeHtml(sess.text)}</td><td>${escapeHtml(r.reliefStaffName || "TBC")}</td><td>${escapeHtml(r.room || "—")}</td><td>${escapeHtml(r.notes || "—")}</td></tr>`;
+          return `<tr><td>${escapeHtml(r.absentStaffName)}</td><td>${escapeHtml(sess.text)}</td><td>${escapeHtml(reliefSummaryText(r) || "TBC")}</td><td>${escapeHtml(r.room || "—")}</td><td>${escapeHtml(r.notes || "—")}</td></tr>`;
         }).join("")}
       </table>` : `<p>No absences logged for today.</p>`}
       <p class="pfoot">Printed ${new Date().toLocaleString("en-AU")}</p>
@@ -1480,7 +1591,7 @@ function renderReliefStats(){
   const topReasons = Object.entries(byReason).sort((a,b) => b[1] - a[1]);
 
   const byReliever = {};
-  entries.forEach(r => { if(r.reliefStaffName) byReliever[r.reliefStaffName] = (byReliever[r.reliefStaffName] || 0) + 1; });
+  entries.forEach(r => { allRelieverNames(r).forEach(name => { byReliever[name] = (byReliever[name] || 0) + 1; }); });
   const topRelievers = Object.entries(byReliever).sort((a,b) => b[1] - a[1]).slice(0, 6);
 
   const rowHtml = (label, count) => `
@@ -1509,7 +1620,7 @@ function globalSearch(query){
   if(!q) return [];
   const results = [];
   state.tasks.forEach(t => { if(`${t.title} ${t.notes}`.toLowerCase().includes(q)) results.push({ type: "Task", label: t.title, tab: "tasks" }); });
-  state.relief.log.forEach(r => { if(`${r.absentStaffName} ${r.reliefStaffName||""} ${r.reason||""} ${r.notes||""}`.toLowerCase().includes(q)) results.push({ type: "Relief", label: `${r.absentStaffName} — ${fmtDateShort(r.date)}`, tab: "relief" }); });
+  state.relief.log.forEach(r => { if(`${r.absentStaffName} ${allRelieverNames(r).join(" ")} ${r.reason||""} ${r.notes||""}`.toLowerCase().includes(q)) results.push({ type: "Relief", label: `${r.absentStaffName} — ${fmtDateShort(r.date)}`, tab: "relief" }); });
   state.meetings.items.forEach(m => { if(`${m.type} ${m.focus} ${m.minutes||""}`.toLowerCase().includes(q)) results.push({ type: "Meeting", label: `${m.type} — ${m.focus} (${fmtDateShort(m.date)})`, tab: "meetings" }); });
   reliefCandidateObjects().forEach(c => { if(`${c.name} ${c.subjects||""} ${c.availability||""}`.toLowerCase().includes(q)) results.push({ type: c.isTeam ? "Team" : "Relief pool", label: c.name, tab: c.isTeam ? "team" : "relief" }); });
   state.files.queue.forEach(f => { if(`${f.fileName} ${f.destination}`.toLowerCase().includes(q)) results.push({ type: "Teams queue", label: f.fileName, tab: "team" }); });
@@ -1533,46 +1644,75 @@ function classesToCoverFor(r){
 function openReliefOutputs(r){
   const card = document.getElementById("reliefOutputCard");
   card.style.display = "";
-  const sess = sessionDescriptionFor(r);
   const leader = state.meta.leaderName || "[Your name]";
   const leaderFirst = leader.split(" ")[0];
   const school = state.meta.schoolName;
-  const classes = classesToCoverFor(r);
-  const classesShort = classes.length ? classes.map(c => `S${c.sessionLabel} ${c.subject}${c.room ? " (" + c.room + ")" : ""}`).join("; ") : "";
-  const classesLines = classes.length ? classes.map(c => `  • S${c.sessionLabel} (${c.time}): ${c.subject}${c.room ? " — Room " + c.room : ""}`).join("\n") : "";
+  const isSplit = !!(r.relievers && r.relievers.length);
+  const groups = relieverGroupsFor(r); // [{name, sessions}] -- one entry, or one per reliever when split
+  const fullSess = sessionDescriptionFor(r);
+  const summaryName = reliefSummaryText(r);
 
-  const smsText = `Hi${r.reliefStaffName ? " " + r.reliefStaffName.split(" ")[0] : ""}, can you cover ${r.absentStaffName} on ${fmtDateShort(r.date)} — ${sess.text}${r.room ? " in " + r.room : ""}?${classesShort ? ` Classes: ${classesShort}.` : ""} ${r.notes ? r.notes + " " : ""}Thanks, ${leaderFirst}`;
+  /** Session description + classes-to-cover scoped to one reliever's own
+   * sessions when coverage is split, or the whole absence otherwise. */
+  function scopeFor(group){
+    if(!isSplit || !group) return { sess: fullSess, classes: classesToCoverFor(r) };
+    const dayKey = dayKeyFromISO(r.date);
+    const dayInfo = state.timetable.days[dayKey];
+    const times = state.timetable.times[dayInfo.kind];
+    const idxs = (group.sessions||[]).slice().sort((a,b)=>a-b);
+    const sess = { text: idxs.map(i => `S${times[i][0]} ${times[i][1]}–${times[i][2]} (${dayInfo.lines[i]})`).join(", "), lines: idxs.map(i => dayInfo.lines[i]) };
+    const all = dayKey ? classesForTeacherToday(r.absentStaffName, dayKey) : [];
+    return { sess, classes: all.filter(c => idxs.includes(c.sessionIdx)) };
+  }
 
-  const mailSubject = `Relief cover needed — ${r.absentStaffName} — ${fmtDateShort(r.date)}`;
-  const mailBody = `Hi${r.reliefStaffName ? " " + r.reliefStaffName.split(" ")[0] : ""},\n\n${r.absentStaffName} is away on ${fmtDateLong(r.date)} and needs cover for: ${sess.text}${r.room ? " in " + r.room : ""}.\n${classesLines ? "\nClasses to cover:\n" + classesLines + "\n" : ""}\nReason: ${r.reason || "—"}\n${r.notes ? "Notes: " + r.notes + "\n" : ""}\nPlease remember to attach the relief notes${r.notes ? "" : " (if the absent teacher has sent them)"} before sending this email — mailto links can't attach files automatically.\n\nThanks,\n${leaderFirst}\n${school}`;
-  const mailto = `mailto:?subject=${encodeURIComponent(mailSubject)}&body=${encodeURIComponent(mailBody)}`;
+  /** SMS/email text addressed to one specific reliever (or nobody yet). */
+  function messagesFor(group){
+    const { sess, classes } = scopeFor(group);
+    const name = group ? group.name : "";
+    const classesShort = classes.length ? classes.map(c => `S${c.sessionLabel} ${c.subject}${c.room ? " (" + c.room + ")" : ""}`).join("; ") : "";
+    const classesLines = classes.length ? classes.map(c => `  • S${c.sessionLabel} (${c.time}): ${c.subject}${c.room ? " — Room " + c.room : ""}`).join("\n") : "";
 
-  const contact = poolContactByName(r.reliefStaffName);
+    const smsText = `Hi${name ? " " + name.split(" ")[0] : ""}, can you cover ${r.absentStaffName} on ${fmtDateShort(r.date)} — ${sess.text}${r.room ? " in " + r.room : ""}?${classesShort ? ` Classes: ${classesShort}.` : ""} ${r.notes ? r.notes + " " : ""}Thanks, ${leaderFirst}`;
 
+    const mailSubject = `Relief cover needed — ${r.absentStaffName} — ${fmtDateShort(r.date)}`;
+    const mailBody = `Hi${name ? " " + name.split(" ")[0] : ""},\n\n${r.absentStaffName} is away on ${fmtDateLong(r.date)} and needs cover for: ${sess.text}${r.room ? " in " + r.room : ""}.\n${classesLines ? "\nClasses to cover:\n" + classesLines + "\n" : ""}\nReason: ${r.reason || "—"}\n${r.notes ? "Notes: " + r.notes + "\n" : ""}\nPlease remember to attach the relief notes${r.notes ? "" : " (if the absent teacher has sent them)"} before sending this email — mailto links can't attach files automatically.\n\nThanks,\n${leaderFirst}\n${school}`;
+    const mailto = `mailto:?subject=${encodeURIComponent(mailSubject)}&body=${encodeURIComponent(mailBody)}`;
+    const contact = poolContactByName(name);
+    return { smsText, mailBody, mailto, contact, name };
+  }
+
+  // Whole-absence data (spreadsheet row + cover sheet describe every
+  // reliever at once, regardless of which one's message is being drafted).
   const cols = state.settings.relief.columns;
   const rowVals = {
-    "Date": r.date, "Absent Staff": r.absentStaffName, "Type": r.type, "Session(s)": sess.text,
-    "Line/Class": sess.lines.join("; "), "Relief Staff": r.reliefStaffName || "", "Reason": r.reason || "",
+    "Date": r.date, "Absent Staff": r.absentStaffName, "Type": r.type, "Session(s)": fullSess.text,
+    "Line/Class": fullSess.lines.join("; "), "Relief Staff": summaryName, "Reason": r.reason || "",
     "Notes": r.notes || "", "Entered By": leader,
   };
   const rowText = cols.map(c => rowVals[c] ?? "").join("\t");
   const headerText = cols.join("\t");
-
-  const coverText = `RELIEF COVER SHEET\n\nAbsent: ${r.absentStaffName}\nDate: ${fmtDateLong(r.date)}\nSessions: ${sess.text}${r.room ? "\nRoom: " + r.room : ""}\nRelief: ${r.reliefStaffName || "TBC"}\n\nNotes:\n${r.notes || "(attach relief notes / work set if provided by absent teacher)"}\n\nReminder: print a class list for each session from EduPoint.`;
-
-  const panels = {
-    "SMS / message": { body: smsText, mono:false, smsHref: contact && contact.phone ? smsHref(contact.phone, smsText) : null },
-    "Email draft": { body: mailBody, mono:false, mailto },
-    "Spreadsheet row": { body: headerText + "\n" + rowText, mono:true },
-    "Cover sheet": { body: coverText, mono:false, printable:true },
-  };
+  const coverText = `RELIEF COVER SHEET\n\nAbsent: ${r.absentStaffName}\nDate: ${fmtDateLong(r.date)}\nSessions: ${fullSess.text}${r.room ? "\nRoom: " + r.room : ""}\nRelief: ${summaryName || "TBC"}\n\nNotes:\n${r.notes || "(attach relief notes / work set if provided by absent teacher)"}\n\nReminder: print a class list for each session from EduPoint.`;
 
   const tabsEl = document.getElementById("outputTabs");
   const panelEl = document.getElementById("outputPanel");
   let active = "SMS / message";
+  let activeRelieverIdx = 0; // which reliever's SMS/email is being drafted, when split
 
   function draw(){
-    tabsEl.innerHTML = Object.keys(panels).map(k =>
+    const group = groups[activeRelieverIdx];
+    const m = messagesFor(group);
+    const panels = {
+      "SMS / message": { body: m.smsText, mono:false, smsHref: m.contact && m.contact.phone ? smsHref(m.contact.phone, m.smsText) : null },
+      "Email draft": { body: m.mailBody, mono:false, mailto: m.mailto },
+      "Spreadsheet row": { body: headerText + "\n" + rowText, mono:true },
+      "Cover sheet": { body: coverText, mono:false, printable:true },
+    };
+    const relieverPicker = groups.length > 1 ? `
+      <div class="row" style="gap:6px; margin-bottom:8px; width:100%;">
+        <span class="hint" style="align-self:center;">Message for:</span>
+        ${groups.map((g,i) => `<button type="button" class="btn btn-sm ${i===activeRelieverIdx?"btn-primary":""}" data-reliever-idx="${i}">${escapeHtml(g.name)} (${sessionLabelList(g.sessions)})</button>`).join("")}
+      </div>` : "";
+    tabsEl.innerHTML = relieverPicker + Object.keys(panels).map(k =>
       `<button class="btn btn-sm ${k===active ? "btn-primary":""}" data-ok="${escapeHtml(k)}">${escapeHtml(k)}</button>`).join("");
     const p = panels[active];
     panelEl.innerHTML = `
@@ -1583,12 +1723,13 @@ function openReliefOutputs(r){
         ${p.printable ? `<button class="btn" id="printCoverBtn">${icon("print")} Print cover sheet</button>` : ""}
         <button class="btn btn-primary" id="copyOutBtn">${icon("copy")} Copy text</button>
       </div>
-      ${active === "SMS / message" && r.reliefStaffName && !(contact && contact.phone) ? `<div class="hint" style="margin-top:6px;">No phone on file for ${escapeHtml(r.reliefStaffName)} — add one in Team &amp; Files to enable "Open in Messages".</div>` : ""}
+      ${active === "SMS / message" && m.name && !(m.contact && m.contact.phone) ? `<div class="hint" style="margin-top:6px;">No phone on file for ${escapeHtml(m.name)} — add one in Team &amp; Files to enable "Open in Messages".</div>` : ""}
     `;
     tabsEl.querySelectorAll("[data-ok]").forEach(b => b.addEventListener("click", () => { active = b.dataset.ok; draw(); }));
+    tabsEl.querySelectorAll("[data-reliever-idx]").forEach(b => b.addEventListener("click", () => { activeRelieverIdx = +b.dataset.relieverIdx; draw(); }));
     document.getElementById("copyOutBtn").addEventListener("click", () => copyText(p.body));
     const printBtn = document.getElementById("printCoverBtn");
-    if(printBtn) printBtn.addEventListener("click", () => printCoverSheet(r, sess));
+    if(printBtn) printBtn.addEventListener("click", () => printCoverSheet(r, fullSess, summaryName));
   }
   draw();
 }
@@ -1600,7 +1741,7 @@ function copyText(text){
   });
 }
 
-function printCoverSheet(r, sess){
+function printCoverSheet(r, sess, reliefLabel){
   const el = document.getElementById("printSheet");
   el.innerHTML = `
     <div class="print-sheet">
@@ -1611,7 +1752,7 @@ function printCoverSheet(r, sess){
         <tr><td><b>Date</b></td><td>${fmtDateLong(r.date)}</td></tr>
         <tr><td><b>Sessions</b></td><td>${escapeHtml(sess.text)}</td></tr>
         <tr><td><b>Room</b></td><td>${escapeHtml(r.room||"—")}</td></tr>
-        <tr><td><b>Relief teacher</b></td><td>${escapeHtml(r.reliefStaffName||"TBC")}</td></tr>
+        <tr><td><b>Relief teacher</b></td><td>${escapeHtml(reliefLabel || reliefSummaryText(r) || "TBC")}</td></tr>
         <tr><td><b>Reason</b></td><td>${escapeHtml(r.reason||"—")}</td></tr>
       </table>
       <p><b>Notes / work set:</b><br>${escapeHtml(r.notes||"(attach relief notes if provided)")}</p>
