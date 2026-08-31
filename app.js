@@ -35,6 +35,15 @@ function dayKeyFromISO(iso){
   return DAY_ORDER[d.getDay()-1] || null; // Sun=0 -> undefined -> null
 }
 
+/** Mon-Fri ISO dates for the school week containing today -- used by the
+ * Dashboard's "This week at a glance" and "Print week's coverage". */
+function currentWeekDates(){
+  const t = new Date(todayISO() + "T00:00:00");
+  const monday = new Date(t);
+  monday.setDate(t.getDate() - ((t.getDay() + 6) % 7)); // getDay(): Sun=0..Sat=6 -> days since Monday
+  return [0,1,2,3,4].map(i => { const d = new Date(monday); d.setDate(monday.getDate()+i); return todayISO(d); });
+}
+
 /* ---------------------------------------------------------------------- */
 /* Default seed data                                                      */
 /* ---------------------------------------------------------------------- */
@@ -615,6 +624,18 @@ function renderDashboard(){
 
   const lineSummary = dayInfo ? dayInfo.lines.join(" · ") : "—";
 
+  const weekDays = currentWeekDates().map(iso => {
+    const dk = dayKeyFromISO(iso);
+    const di = dk ? state.timetable.days[dk] : null;
+    return {
+      iso,
+      label: new Date(iso + "T00:00:00").toLocaleDateString("en-AU", { weekday: "short" }),
+      lineSummary: di ? di.lines.join(" · ") : "—",
+      awayCount: state.relief.log.filter(r => r.date === iso).length,
+      meetingCount: state.meetings.items.filter(m => m.date === iso).length,
+    };
+  });
+
   root.innerHTML = `
     <dl class="titleblock">
       <div><dt>Date</dt><dd class="mono">${fmtDateShort(today)}</dd></div>
@@ -623,7 +644,24 @@ function renderDashboard(){
       <div><dt>Learning Area</dt><dd>${escapeHtml(state.meta.learningArea)}</dd></div>
     </dl>
 
-    <div class="grid grid-2">
+    <div class="card section-gap">
+      <div class="card-head"><h2>${icon("calendar")} This week at a glance</h2></div>
+      <div class="row" style="gap:10px; overflow-x:auto;">
+        ${weekDays.map(d => `
+          <div class="stat-tile" style="flex:1; min-width:118px; ${d.iso === today ? "border-color:var(--accent);" : ""}">
+            <div class="stat-label">${escapeHtml(d.label)} <span class="mono">${fmtDateShort(d.iso).replace(/^\w+, /, "")}</span></div>
+            <div class="hint" style="margin:4px 0;">${escapeHtml(d.lineSummary)}</div>
+            <div class="row" style="gap:4px; justify-content:center; flex-wrap:wrap;">
+              ${d.awayCount ? `<span class="badge badge-flag">${d.awayCount} away</span>` : ""}
+              ${d.meetingCount ? `<span class="badge badge-muted">${d.meetingCount} mtg</span>` : ""}
+              ${!d.awayCount && !d.meetingCount ? `<span class="hint">—</span>` : ""}
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    </div>
+
+    <div class="grid grid-2 section-gap">
       <div class="card">
         <div class="card-head"><h2>${icon("clock")} Today's sessions</h2></div>
         ${dayInfo ? renderSessionRows(dayInfo, times, today, dayKey) : `<div class="empty-state">${icon("calendar")}<div>No timetabled sessions on weekends.</div></div>`}
@@ -848,6 +886,10 @@ function poolContactByName(name){
   const n = name.trim().toLowerCase();
   return state.relief.externalPool.find(p => p.name.toLowerCase() === n) || null;
 }
+/** True while a pool contact's own "unavailable until" date hasn't passed
+ * yet (e.g. their own leave/holidays) -- today still counts as unavailable. */
+function isCurrentlyUnavailable(c){ return !!(c.unavailableUntil && c.unavailableUntil >= todayISO()); }
+function unavailableBadgeHtml(c){ return isCurrentlyUnavailable(c) ? `<span class="badge badge-flag">Unavailable until ${fmtDateShort(c.unavailableUntil)}</span> ` : ""; }
 function telHref(phone){ return "tel:" + phone.replace(/[^\d+]/g, ""); }
 function smsHref(phone, body){ return "sms:" + phone.replace(/[^\d+]/g, "") + "?body=" + encodeURIComponent(body); }
 
@@ -1000,10 +1042,17 @@ function renderRelief(){
     </div>
 
     <div class="card section-gap">
+      <div class="card-head"><h2>${icon("users")} Leave tallies (this year)</h2></div>
+      <div class="hint" style="margin-bottom:8px;">Counts each logged relief entry as one instance — a "Specific session(s)" entry counts the same as a full day.</div>
+      <div id="leaveTallies"></div>
+    </div>
+
+    <div class="card section-gap">
       <div class="card-head">
         <h2>Relief log</h2>
         <div class="row" style="gap:8px;">
           <button class="btn btn-sm" id="printTodayBtn">${icon("print")} Print today's coverage</button>
+          <button class="btn btn-sm" id="printWeekBtn">${icon("print")} Print week's coverage</button>
           <button class="btn btn-sm" id="exportReliefCsvBtn">${icon("export")} Export CSV</button>
           <input type="search" id="reliefSearch" placeholder="Search log…" style="max-width:220px;">
         </div>
@@ -1022,12 +1071,12 @@ function renderRelief(){
       </div>
       <div id="reliefLog"></div>
     </div>
-
-    <div class="print-only" id="printSheet"></div>
   `;
 
   document.getElementById("printTodayBtn").addEventListener("click", printTodaysCoverage);
+  document.getElementById("printWeekBtn").addEventListener("click", printWeekCoverage);
   renderReliefStats();
+  renderLeaveTallies();
 
   const staffSel = document.getElementById("rf-staff");
   staffSel.addEventListener("change", () => {
@@ -1275,7 +1324,11 @@ function renderReliefPool(filter=""){
 
   if(f) pool = pool.filter(c => `${c.name} ${c.availability} ${c.subjects}`.toLowerCase().includes(f));
   pool = pool.filter(c => matchesSubjectFilter(c, reliefDirSubjectFilter));
-  pool = reliefDirSort.key ? sortRows(pool, reliefDirSort) : pool.sort((a,b) => (a.last||"").localeCompare(b.last||"") || a.count - b.count);
+  // Currently-unavailable contacts sort below available ones either way,
+  // so a run of leave/holidays doesn't crowd out who can actually help.
+  pool = reliefDirSort.key
+    ? sortRows(pool, reliefDirSort)
+    : pool.sort((a,b) => (isCurrentlyUnavailable(a) - isCurrentlyUnavailable(b)) || (a.last||"").localeCompare(b.last||"") || a.count - b.count);
 
   if(!pool.length){ box.innerHTML = `<div class="empty-state">No matches. Try clearing the subject filter, or add contacts in Team &amp; Files.</div>`; return; }
 
@@ -1298,7 +1351,7 @@ function renderReliefPool(filter=""){
       </td>
       <td>${escapeHtml(p.lastName)}</td>
       <td class="mono" style="white-space:nowrap;">${p.phone ? `<a href="${telHref(p.phone)}">${icon("phone","mini-icon")}${escapeHtml(p.phone)}</a>` : ""}${p.phone && p.email ? " · " : ""}${p.email ? `<a href="mailto:${escapeHtml(p.email)}">email</a>` : (!p.phone ? "—" : "")}</td>
-      <td class="hint">${escapeHtml(p.availability || "—")}</td>
+      <td class="hint">${unavailableBadgeHtml(p)}${escapeHtml(p.availability || "—")}</td>
       <td class="hint">${escapeHtml(p.subjects || "—")}</td>
       <td class="mono">${p.count}</td>
       <td class="mono">${p.last ? fmtDateShort(p.last) : "—"}</td>
@@ -1424,10 +1477,10 @@ function renderReliefLog(){
     const removedIdx = state.relief.log.findIndex(x => x.id === b.dataset.del);
     if(removedIdx === -1) return;
     const [removed] = state.relief.log.splice(removedIdx, 1);
-    persist(); renderReliefLog(); renderReliefPool(); renderReliefStats();
+    persist(); renderReliefLog(); renderReliefPool(); renderReliefStats(); renderLeaveTallies();
     toast("Relief entry removed.", { actionLabel: "Undo", onAction: () => {
       state.relief.log.splice(Math.min(removedIdx, state.relief.log.length), 0, removed);
-      persist(); renderReliefLog(); renderReliefPool(); renderReliefStats();
+      persist(); renderReliefLog(); renderReliefPool(); renderReliefStats(); renderLeaveTallies();
       toast("Restored.");
     }});
   }));
@@ -1716,6 +1769,55 @@ function printTodaysCoverage(){
   window.print();
 }
 
+/** One page for the whole current school week (Mon-Fri), grouped by day --
+ * same shape as "Today's coverage" but for planning a busy week ahead
+ * rather than the daily staffroom sheet. */
+function printWeekCoverage(){
+  const weekDates = currentWeekDates();
+  const el = document.getElementById("printSheet");
+  el.innerHTML = `
+    <div class="print-sheet">
+      <h1>This Week's Coverage</h1>
+      <p>${escapeHtml(state.meta.schoolName)} · ${escapeHtml(state.meta.learningArea)} · ${fmtDateLong(weekDates[0])} – ${fmtDateLong(weekDates[4])}</p>
+      ${weekDates.map(date => {
+        const entries = state.relief.log.filter(r => r.date === date);
+        return `<h2 style="margin-top:16px;">${fmtDateLong(date)}</h2>
+          ${entries.length ? `<table border="1" cellpadding="6" style="border-collapse:collapse;width:100%;">
+            <tr><th>Absent</th><th>Sessions</th><th>Relief</th><th>Room</th><th>Notes</th></tr>
+            ${entries.map(r => {
+              const sess = sessionDescriptionFor(r);
+              return `<tr><td>${escapeHtml(r.absentStaffName)}</td><td>${escapeHtml(sess.text)}</td><td>${escapeHtml(reliefSummaryText(r) || "TBC")}</td><td>${escapeHtml(r.room || "—")}</td><td>${escapeHtml(r.notes || "—")}</td></tr>`;
+            }).join("")}
+          </table>` : `<p>No absences logged.</p>`}`;
+      }).join("")}
+      <p class="pfoot">Printed ${new Date().toLocaleString("en-AU")}</p>
+    </div>
+  `;
+  window.print();
+}
+
+/** Per-absent-staff-member leave tallies over a set of relief.log entries
+ * -- total entries plus a breakdown by reason, sorted by total descending.
+ * Shared by the always-visible "this year" widget on the Relief tab and
+ * the term/year summary report (fed whatever date range it's scoped to).
+ * Counts each LOGGED ENTRY as one instance, not a fractional day -- a
+ * "Specific session(s)" entry counts the same as a full day, so treat this
+ * as a count of absences logged, not a precise day tally. */
+function leaveTalliesByStaff(entries){
+  const byStaff = {};
+  entries.forEach(r => {
+    const name = r.absentStaffName;
+    if(!byStaff[name]) byStaff[name] = { name, total: 0, byReason: {} };
+    byStaff[name].total++;
+    const k = r.reason || "Unspecified";
+    byStaff[name].byReason[k] = (byStaff[name].byReason[k] || 0) + 1;
+  });
+  return Object.values(byStaff).sort((a,b) => b.total - a.total);
+}
+function leaveTallyBreakdownText(tally){
+  return Object.entries(tally.byReason).sort((a,b) => b[1]-a[1]).map(([k,v]) => `${k}: ${v}`).join(", ");
+}
+
 /** This term's relief numbers — absences, reasons, who's covering most,
  * pending pay entries. Bounded to the current term's date range if we're
  * in one, otherwise shows everything logged. */
@@ -1756,6 +1858,103 @@ function renderReliefStats(){
       <div><h3 style="margin-bottom:6px;">Most-used relief</h3>${topRelievers.length ? topRelievers.map(([n,c]) => rowHtml(n,c)).join("") : `<div class="hint">No data yet.</div>`}</div>
     </div>
   `;
+}
+
+/** Always-on-screen leave tally per absent staff member, scoped to the
+ * current calendar year -- distinct from the printable term/year summary
+ * report, which can cover any chosen term or the whole year on demand. */
+function renderLeaveTallies(){
+  const box = document.getElementById("leaveTallies");
+  if(!box) return;
+  const year = new Date().getFullYear();
+  const entries = state.relief.log.filter(r => r.date && r.date.slice(0,4) === String(year));
+  const tallies = leaveTalliesByStaff(entries);
+  if(!tallies.length){ box.innerHTML = `<div class="hint">No absences logged in ${year} yet.</div>`; return; }
+  box.innerHTML = `<div class="list">${tallies.map(t => `
+    <div class="item" style="padding:7px 10px;">
+      <div class="item-main" style="display:flex; justify-content:space-between; align-items:baseline; gap:10px;">
+        <span>${escapeHtml(t.name)}</span><span class="mono badge badge-muted">${t.total}</span>
+      </div>
+      <div class="hint">${escapeHtml(leaveTallyBreakdownText(t))}</div>
+    </div>
+  `).join("")}</div>`;
+}
+
+/** Resolves the Settings report scope-picker's value to a concrete date
+ * range + label -- either a configured term, or the whole current
+ * calendar year. */
+function summaryReportRange(scope){
+  if(scope === "whole-year"){
+    const y = new Date().getFullYear();
+    return { label: `${y} — whole year`, start: `${y}-01-01`, end: `${y}-12-31` };
+  }
+  const term = state.settings.terms.find(t => String(t.number) === String(scope));
+  if(!term) return null;
+  return { label: `Term ${term.number} (${fmtDateShort(term.startDate)}–${fmtDateShort(term.endDate)})`, start: term.startDate, end: term.endDate };
+}
+
+/** Printable term/year summary: relief absences (with leave tallies per
+ * staff member), meetings held, and task completion -- for line-manager
+ * conversations or your own record. Reuses the same #printSheet target
+ * as every other print action, so it works from any tab. */
+function generateSummaryReport(scope){
+  const range = summaryReportRange(scope);
+  if(!range){ toast("Pick a valid report scope."); return; }
+
+  const relief = state.relief.log.filter(r => r.date >= range.start && r.date <= range.end);
+  const byReason = {};
+  relief.forEach(r => { const k = r.reason || "Unspecified"; byReason[k] = (byReason[k]||0)+1; });
+  const topReasons = Object.entries(byReason).sort((a,b)=>b[1]-a[1]);
+  const byReliever = {};
+  relief.forEach(r => { allRelieverNames(r).forEach(n => { byReliever[n] = (byReliever[n]||0)+1; }); });
+  const topRelievers = Object.entries(byReliever).sort((a,b)=>b[1]-a[1]);
+  const tallies = leaveTalliesByStaff(relief);
+
+  const meetings = state.meetings.items.filter(m => m.date >= range.start && m.date <= range.end).sort((a,b)=>a.date.localeCompare(b.date));
+  const meetingsByType = {};
+  meetings.forEach(m => { meetingsByType[m.type] = (meetingsByType[m.type]||0)+1; });
+
+  const tasksInRange = state.tasks.filter(t => t.createdAt && t.createdAt.slice(0,10) >= range.start && t.createdAt.slice(0,10) <= range.end);
+  const tasksDone = tasksInRange.filter(t => t.status === "done").length;
+  const completionRate = tasksInRange.length ? Math.round((tasksDone / tasksInRange.length) * 100) : null;
+
+  const rowsHtml = (pairs) => pairs.length
+    ? `<table border="1" cellpadding="6" style="border-collapse:collapse;width:100%;">${pairs.map(([k,v]) => `<tr><td>${escapeHtml(k)}</td><td class="mono" style="text-align:right;">${v}</td></tr>`).join("")}</table>`
+    : `<p>No data.</p>`;
+
+  const el = document.getElementById("printSheet");
+  el.innerHTML = `
+    <div class="print-sheet">
+      <h1>Summary Report — ${escapeHtml(range.label)}</h1>
+      <p>${escapeHtml(state.meta.schoolName)} · ${escapeHtml(state.meta.learningArea)} · ${escapeHtml(state.meta.leaderName || "")}</p>
+
+      <h2 style="margin-top:18px;">Relief absences</h2>
+      <p>${relief.length} absence${relief.length===1?"":"s"} logged, covered by ${Object.keys(byReliever).length} ${Object.keys(byReliever).length===1?"person":"people"}.</p>
+      <div class="grid grid-2">
+        <div><h3>By reason</h3>${rowsHtml(topReasons)}</div>
+        <div><h3>By reliever</h3>${rowsHtml(topRelievers)}</div>
+      </div>
+      <h3 style="margin-top:10px;">Leave tallies by staff member</h3>
+      ${tallies.length ? `<table border="1" cellpadding="6" style="border-collapse:collapse;width:100%;">
+        <tr><th>Staff</th><th>Total</th><th>Breakdown</th></tr>
+        ${tallies.map(t => `<tr><td>${escapeHtml(t.name)}</td><td class="mono">${t.total}</td><td>${escapeHtml(leaveTallyBreakdownText(t))}</td></tr>`).join("")}
+      </table>` : `<p>No data.</p>`}
+
+      <h2 style="margin-top:18px;">Meetings held</h2>
+      <p>${meetings.length} meeting${meetings.length===1?"":"s"} in this period.</p>
+      ${meetingsByType && Object.keys(meetingsByType).length ? rowsHtml(Object.entries(meetingsByType).sort((a,b)=>b[1]-a[1])) : ""}
+      ${meetings.length ? `<table border="1" cellpadding="6" style="border-collapse:collapse;width:100%; margin-top:8px;">
+        <tr><th>Date</th><th>Type</th><th>Focus</th></tr>
+        ${meetings.map(m => `<tr><td class="mono">${fmtDateShort(m.date)}</td><td>${escapeHtml(m.type)}</td><td>${escapeHtml(m.focus||"—")}</td></tr>`).join("")}
+      </table>` : ""}
+
+      <h2 style="margin-top:18px;">Tasks</h2>
+      <p>${tasksInRange.length} task${tasksInRange.length===1?"":"s"} created in this period, ${tasksDone} completed${completionRate!==null ? ` (${completionRate}% completion rate, as at time of printing)` : ""}.</p>
+
+      <p class="pfoot">Printed ${new Date().toLocaleString("en-AU")}</p>
+    </div>
+  `;
+  window.print();
 }
 
 /** Search across tasks, relief log, meetings, team/relief pool and the
@@ -1974,6 +2173,13 @@ function renderMeetings(){
             <input type="text" id="mf-focus-other" placeholder="e.g. Numeracy">
           </div>
         </div>
+        <div class="field">
+          <label class="checkline"><input type="checkbox" id="mf-repeat"> Repeats weekly on this day</label>
+        </div>
+        <div class="field" id="mf-repeat-until-wrap" style="display:none;">
+          <label for="mf-repeat-until">Repeat until (inclusive)</label>
+          <input type="date" id="mf-repeat-until">
+        </div>
         <button class="btn btn-primary" type="submit">${icon("plus")} Add meeting</button>
       </form>
     </div>
@@ -2000,6 +2206,9 @@ function renderMeetings(){
   mfFocusSel.addEventListener("change", () => {
     document.getElementById("mf-focus-other-wrap").style.display = mfFocusSel.value === "__other" ? "" : "none";
   });
+  document.getElementById("mf-repeat").addEventListener("change", e => {
+    document.getElementById("mf-repeat-until-wrap").style.display = e.target.checked ? "" : "none";
+  });
 
   document.getElementById("meetingForm").addEventListener("submit", e => {
     e.preventDefault();
@@ -2013,13 +2222,35 @@ function renderMeetings(){
       focus = document.getElementById("mf-focus-other").value.trim();
       if(!focus){ toast("Enter a name for this meeting's focus."); return; }
     }
-    const m = {
-      id: uid(), type, date: document.getElementById("mf-date").value, focus,
+    const baseDate = document.getElementById("mf-date").value;
+    const shared = {
+      type, focus,
       startTime: document.getElementById("mf-start").value,
       endTime: document.getElementById("mf-end").value,
       agenda: [...(state.meetings.standingItems[focus] || state.meetings.standingItems["General"])],
-      minutes: "", actions: [],
     };
+
+    // Repeats weekly: one standalone meeting per week (same weekday, same
+    // type/focus/times/agenda) up to the chosen end date -- each is its own
+    // fully independent record, editable/deletable individually, same
+    // pattern as the relief log's multi-day absence logging.
+    const repeatCb = document.getElementById("mf-repeat");
+    const repeatUntil = repeatCb.checked ? document.getElementById("mf-repeat-until").value : "";
+    if(repeatUntil && repeatUntil > baseDate){
+      const dates = [];
+      const d = new Date(baseDate + "T00:00:00");
+      const end = new Date(repeatUntil + "T00:00:00");
+      while(d <= end){ dates.push(todayISO(d)); d.setDate(d.getDate()+7); }
+      const created = dates.map(date => ({ id: uid(), date, ...shared, minutes: "", actions: [] }));
+      state.meetings.items.push(...created);
+      persist();
+      toast(`${created.length} meetings added, weekly ${fmtDateShort(dates[0])}–${fmtDateShort(dates[dates.length-1])}.`);
+      renderMeetings();
+      openMeetingDetail(created[0].id);
+      return;
+    }
+
+    const m = { id: uid(), date: baseDate, ...shared, minutes: "", actions: [] };
     state.meetings.items.push(m);
     persist(); toast("Meeting added."); renderMeetings(); openMeetingDetail(m.id);
   });
@@ -2243,6 +2474,8 @@ function renderTasks(){
         <div class="field"><label for="tf-assignee">Assignee</label>
           <select id="tf-assignee"><option value="">Me</option>${allStaffNames().map(n=>`<option>${escapeHtml(n)}</option>`).join("")}</select>
         </div>
+        <div class="field"><label class="checkline" title="Needs a due date to repeat from"><input type="checkbox" id="tf-repeat"> Repeat weekly</label></div>
+        <div class="field" id="tf-repeat-until-wrap" style="display:none;"><label for="tf-repeat-until">Until</label><input type="date" id="tf-repeat-until"></div>
         <div class="field" style="align-self:flex-end;"><button class="btn btn-primary" type="submit">${icon("plus")} Add</button></div>
       </form>
     </div>
@@ -2264,12 +2497,37 @@ function renderTasks(){
     </div>
   `;
 
+  document.getElementById("tf-repeat").addEventListener("change", e => {
+    document.getElementById("tf-repeat-until-wrap").style.display = e.target.checked ? "" : "none";
+  });
+
   document.getElementById("taskForm").addEventListener("submit", e => {
     e.preventDefault();
     const title = document.getElementById("tf-title").value.trim();
     if(!title) return;
-    state.tasks.unshift({ id: uid(), title, notes:"", due: document.getElementById("tf-due").value, assignee: document.getElementById("tf-assignee").value, status:"open", createdAt: new Date().toISOString() });
-    persist(); toast("Task added."); e.target.reset(); renderTaskList();
+    const due = document.getElementById("tf-due").value;
+    const assignee = document.getElementById("tf-assignee").value;
+    const repeatCb = document.getElementById("tf-repeat");
+    const repeatUntil = repeatCb.checked ? document.getElementById("tf-repeat-until").value : "";
+
+    // Repeat weekly needs an anchor date to count from -- each week becomes
+    // its own standalone task (same title/assignee), independently
+    // completable/deletable, same pattern as recurring meetings.
+    if(repeatUntil && due && repeatUntil > due){
+      const dates = [];
+      const d = new Date(due + "T00:00:00");
+      const end = new Date(repeatUntil + "T00:00:00");
+      while(d <= end){ dates.push(todayISO(d)); d.setDate(d.getDate()+7); }
+      const created = dates.map(dueDate => ({ id: uid(), title, notes:"", due: dueDate, assignee, status:"open", createdAt: new Date().toISOString() }));
+      state.tasks.unshift(...created);
+      persist();
+      toast(`${created.length} tasks added, weekly ${fmtDateShort(dates[0])}–${fmtDateShort(dates[dates.length-1])}.`);
+      e.target.reset(); document.getElementById("tf-repeat-until-wrap").style.display = "none"; renderTaskList();
+      return;
+    }
+
+    state.tasks.unshift({ id: uid(), title, notes:"", due, assignee, status:"open", createdAt: new Date().toISOString() });
+    persist(); toast("Task added."); e.target.reset(); document.getElementById("tf-repeat-until-wrap").style.display = "none"; renderTaskList();
   });
   document.getElementById("taskFilter").addEventListener("change", renderTaskList);
   renderTaskList();
@@ -2474,7 +2732,7 @@ function renderTeamFiles(){
         </td>
         <td>${escapeHtml(p.lastName)}</td>
         <td class="mono" style="white-space:nowrap;">${escapeHtml(p.phone||"—")}${p.email ? `<br><span style="font-family:inherit;">${escapeHtml(p.email)}</span>` : ""}</td>
-        <td class="hint">${escapeHtml(p.availability||"—")}</td>
+        <td class="hint">${unavailableBadgeHtml(p)}${escapeHtml(p.availability||"—")}</td>
         <td class="hint">${escapeHtml(p.subjects||"—")}</td>
         <td style="white-space:nowrap;">
           <button class="btn btn-sm" data-pool-edit="${p.id}">${icon("edit")}</button>
@@ -2517,13 +2775,14 @@ let poolEditingId = null;
 
 function openPoolModal(id = null){
   poolEditingId = id;
-  const c = id ? state.relief.externalPool.find(p => p.id === id) : { name:"", phone:"", email:"", availability:"", subjects:"" };
+  const c = id ? state.relief.externalPool.find(p => p.id === id) : { name:"", phone:"", email:"", availability:"", subjects:"", unavailableUntil:"" };
   document.getElementById("poolModalTitle").textContent = id ? "Edit relief contact" : "Add relief contact";
   document.getElementById("pm-name").value = c.name;
   document.getElementById("pm-phone").value = c.phone;
   document.getElementById("pm-email").value = c.email;
   document.getElementById("pm-availability").value = c.availability;
   document.getElementById("pm-subjects").value = c.subjects;
+  document.getElementById("pm-unavailable").value = c.unavailableUntil || "";
   document.getElementById("poolModalBackdrop").classList.add("show");
   document.getElementById("pm-name").focus();
 }
@@ -2540,6 +2799,7 @@ function savePoolModal(){
     email: document.getElementById("pm-email").value.trim(),
     availability: document.getElementById("pm-availability").value.trim(),
     subjects: document.getElementById("pm-subjects").value.trim(),
+    unavailableUntil: document.getElementById("pm-unavailable").value,
   };
   if(poolEditingId){
     const c = state.relief.externalPool.find(p => p.id === poolEditingId);
@@ -2590,6 +2850,21 @@ function renderSettings(){
         <div class="hint" style="margin-bottom:8px;">Order matches what gets copied when you generate a "Spreadsheet row" output. Comma-separated.</div>
         <textarea id="st-columns" style="min-height:60px;">${escapeHtml(state.settings.relief.columns.join(", "))}</textarea>
         <div class="field section-gap"><label for="st-teamschannel">Teams destination (for file queue default)</label><input type="text" id="st-teamschannel" value="${escapeHtml(state.settings.teamsChannel)}"></div>
+      </div>
+    </div>
+
+    <div class="card section-gap">
+      <div class="card-head"><h2>${icon("print")} Term / year summary report</h2></div>
+      <div class="hint" style="margin-bottom:10px;">A printable summary of relief absences (including leave tallies per staff member), meetings held, and task completion for a chosen term or the whole year — handy for line-manager conversations.</div>
+      <div class="row" style="gap:10px; align-items:flex-end;">
+        <div class="field" style="margin:0; flex:1;">
+          <label for="reportScope">Scope</label>
+          <select id="reportScope">
+            <option value="whole-year">Whole year (${new Date().getFullYear()})</option>
+            ${state.settings.terms.map(t => `<option value="${t.number}">Term ${t.number} (${fmtDateShort(t.startDate)}–${fmtDateShort(t.endDate)})</option>`).join("")}
+          </select>
+        </div>
+        <button class="btn btn-primary" id="generateReportBtn">${icon("print")} Generate &amp; print</button>
       </div>
     </div>
 
@@ -2689,6 +2964,7 @@ function renderSettings(){
     document.getElementById("ql-new-label").value=""; document.getElementById("ql-new-url").value="";
   });
 
+  document.getElementById("generateReportBtn").addEventListener("click", () => generateSummaryReport(document.getElementById("reportScope").value));
   document.getElementById("exportBtn").addEventListener("click", exportBackup);
   document.getElementById("importBtn").addEventListener("click", importBackup);
 
