@@ -30,6 +30,11 @@ function fmtDateShort(iso){
 function escapeHtml(s){
   return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
+function formatBytes(n){
+  if(n < 1024) return n + " B";
+  if(n < 1024*1024) return (n/1024).toFixed(0) + " KB";
+  return (n/(1024*1024)).toFixed(1) + " MB";
+}
 function dayKeyFromISO(iso){
   const d = new Date(iso + "T00:00:00");
   return DAY_ORDER[d.getDay()-1] || null; // Sun=0 -> undefined -> null
@@ -260,8 +265,19 @@ function deepMerge(base, override){
 function persist(){
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     const el = document.getElementById("saveIndicator");
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    } catch(err){
+      // Most likely a quota error -- relief attachments are the one thing
+      // in this app large enough to hit it. Surfacing this matters: without
+      // it, the change stays in memory but silently never actually saves,
+      // and vanishes on next reload with no warning at all.
+      console.error("Save failed:", err);
+      if(el) el.textContent = "Save failed!";
+      toast("Save failed — storage is full. Try removing a large attachment from a relief entry.", { duration: 6000 });
+      return;
+    }
     if(el){
       const t = new Date();
       el.textContent = `Saved ${t.toLocaleTimeString("en-AU",{hour:"2-digit",minute:"2-digit"})}`;
@@ -532,7 +548,7 @@ function toast(msg, opts){
     el.textContent = msg;
     el.classList.remove("has-action");
     el.classList.add("show");
-    toast._t = setTimeout(() => el.classList.remove("show"), 2200);
+    toast._t = setTimeout(() => el.classList.remove("show"), (opts && opts.duration) || 2200);
   }
 }
 
@@ -832,12 +848,19 @@ function contactLinksHtml(name){
   if(c.email) bits.push(`<a href="mailto:${escapeHtml(c.email)}">Email</a>`);
   return ` · ${bits.join(" · ")}`;
 }
+/** Download links for a relief entry's attached documents -- the data URL
+ * is used directly as the href, so no server or Blob juggling is needed. */
+function attachmentLinksHtml(attachments){
+  if(!attachments || !attachments.length) return "";
+  return attachments.map(a => `<a href="${a.dataUrl}" download="${escapeHtml(a.name)}">${icon("file","mini-icon")}${escapeHtml(a.name)}</a>`).join(" · ");
+}
 
 /* ---------------------------------------------------------------------- */
 /* RELIEF                                                                 */
 /* ---------------------------------------------------------------------- */
 let reliefDraft = null; // holds in-progress generated outputs context
 let reliefEditingId = null;
+let reliefPendingAttachments = []; // {name,type,size,dataUrl}[] for the form currently open (add or edit)
 let reliefDirSort = { key: null, dir: 1 };   // Relief tab directory table sort
 let poolManageSort = { key: null, dir: 1 };  // Team & Files pool management table sort
 let reliefDirSubjectFilter = new Set();      // Relief tab directory subject-tag filter
@@ -932,6 +955,29 @@ function matchesSubjectFilter(contact, selectedTags){
   return false;
 }
 
+/** Renders whatever's currently staged in reliefPendingAttachments (new
+ * uploads this session, plus any the entry already had when editing) into
+ * the "Log an absence" form -- top-level (not nested in renderRelief) so
+ * populateReliefFormForEdit can refresh it too when loading an existing
+ * entry's attachments. */
+function renderPendingAttachments(){
+  const box = document.getElementById("rf-attachment-list");
+  if(!box) return;
+  if(!reliefPendingAttachments.length){ box.innerHTML = ""; return; }
+  box.innerHTML = `<div class="list">${reliefPendingAttachments.map((a,i) => `
+    <div class="item" style="padding:6px 10px;">
+      <div class="item-main" style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+        <span>${icon("file","mini-icon")} ${escapeHtml(a.name)} <span class="hint">(${formatBytes(a.size)})</span></span>
+        <button type="button" class="btn btn-sm btn-danger" data-remove-attachment="${i}">${icon("trash")}</button>
+      </div>
+    </div>
+  `).join("")}</div>`;
+  box.querySelectorAll("[data-remove-attachment]").forEach(b => b.addEventListener("click", () => {
+    reliefPendingAttachments.splice(+b.dataset.removeAttachment, 1);
+    renderPendingAttachments();
+  }));
+}
+
 function renderRelief(){
   const root = document.getElementById("view-relief");
   const today = todayISO();
@@ -1011,6 +1057,12 @@ function renderRelief(){
           <div class="field">
             <label for="rf-notes">Notes (relief instructions, work set, etc.)</label>
             <textarea id="rf-notes" placeholder="What should the relief teacher know?"></textarea>
+          </div>
+          <div class="field">
+            <label for="rf-attachments">Attach a document (optional — work set, class list, etc.)</label>
+            <input type="file" id="rf-attachments" multiple>
+            <div class="hint">Stored with this entry on this computer. <code>mailto:</code> can't attach files automatically — "Email draft" will show a download link for each one instead, ready to drag into the email that opens.</div>
+            <div id="rf-attachment-list" style="margin-top:6px;"></div>
           </div>
           <button class="btn btn-primary" type="submit" id="reliefSubmitBtn">${icon("plus")} Log absence</button>
         </form>
@@ -1185,6 +1237,26 @@ function renderRelief(){
   document.getElementById("rf-split-relief").addEventListener("change", renderSessionRelieverInputs);
   renderSessionCheckboxes();
   renderClassesPanel();
+  renderPendingAttachments();
+
+  document.getElementById("rf-attachments").addEventListener("change", e => {
+    const files = [...e.target.files];
+    let remaining = files.length;
+    if(!remaining) return;
+    files.forEach(file => {
+      if(file.size > 3*1024*1024){
+        toast(`${file.name} is ${formatBytes(file.size)} — large attachments use up this computer's storage quickly (and slow down sync, if it's on). A smaller file works better if you have a choice.`, { duration: 6000 });
+      }
+      const reader = new FileReader();
+      const done = () => { remaining--; if(remaining === 0){ renderPendingAttachments(); e.target.value = ""; } };
+      reader.onload = () => {
+        reliefPendingAttachments.push({ name: file.name, type: file.type || "application/octet-stream", size: file.size, dataUrl: reader.result });
+        done();
+      };
+      reader.onerror = () => { toast(`Couldn't read ${file.name}.`); done(); };
+      reader.readAsDataURL(file);
+    });
+  });
 
   function resetReliefFormToAddMode(){
     reliefEditingId = null;
@@ -1194,6 +1266,8 @@ function renderRelief(){
     document.getElementById("reliefForm").reset();
     staffSel.dispatchEvent(new Event("change"));
     dateInput.value = todayISO();
+    reliefPendingAttachments = [];
+    renderPendingAttachments();
     renderSessionCheckboxes();
     renderClassesPanel();
   }
@@ -1231,6 +1305,7 @@ function renderRelief(){
       relievers,
       reason: document.getElementById("rf-reason").value,
       notes: document.getElementById("rf-notes").value.trim(),
+      attachments: [...reliefPendingAttachments],
     };
 
     if(reliefEditingId){
@@ -1267,6 +1342,7 @@ function renderRelief(){
       state.relief.log.unshift(...records);
       persist();
       toast(`${records.length} absence${records.length>1?"s":""} logged, ${fmtDateShort(dates[0])}–${fmtDateShort(dates[dates.length-1])}.`);
+      reliefPendingAttachments = []; // don't carry an attachment forward into whatever's logged next
       renderRelief();
       openReliefOutputs(records[0]);
       document.getElementById("reliefOutputCard").scrollIntoView({behavior:"smooth"});
@@ -1285,6 +1361,7 @@ function renderRelief(){
     state.relief.log.unshift(record);
     persist();
     toast("Absence logged.");
+    reliefPendingAttachments = []; // don't carry an attachment forward into whatever's logged next
     renderRelief();
     openReliefOutputs(record);
     document.getElementById("reliefOutputCard").scrollIntoView({behavior:"smooth"});
@@ -1455,6 +1532,7 @@ function renderReliefLog(){
       <div class="item-main">
         <div class="item-title">${escapeHtml(r.absentStaffName)} <span class="badge badge-flag">${escapeHtml(sessLabel)}</span></div>
         <div class="item-sub mono">${fmtDateShort(r.date)} · ${reliefSummaryText(r) ? "Relief: " + escapeHtml(reliefSummaryText(r)) : "No relief assigned"} · ${escapeHtml(r.reason||"")}${allRelieverNames(r).length === 1 ? contactLinksHtml(allRelieverNames(r)[0]) : ""}</div>
+        ${r.attachments && r.attachments.length ? `<div class="item-sub">${attachmentLinksHtml(r.attachments)}</div>` : ""}
       </div>
       <div class="item-actions">
         <button class="btn btn-sm" data-out="${r.id}">${icon("copy")} Outputs</button>
@@ -1551,6 +1629,8 @@ function populateReliefFormForEdit(r){
   }
   document.getElementById("rf-reason").value = r.reason || "Personal / sick leave";
   document.getElementById("rf-notes").value = r.notes || "";
+  reliefPendingAttachments = [...(r.attachments || [])];
+  renderPendingAttachments();
 
   document.getElementById("reliefFormHeading").innerHTML = `${icon("edit")} Edit absence`;
   document.getElementById("reliefSubmitBtn").innerHTML = `${icon("check")} Save changes`;
@@ -2019,7 +2099,10 @@ function openReliefOutputs(r){
     const smsText = `Hi${name ? " " + name.split(" ")[0] : ""}, can you cover ${r.absentStaffName} on ${fmtDateShort(r.date)} — ${sess.text}${r.room ? " in " + r.room : ""}?${classesShort ? ` Classes: ${classesShort}.` : ""} ${r.notes ? r.notes + " " : ""}Thanks, ${leaderFirst}`;
 
     const mailSubject = `Relief cover needed — ${r.absentStaffName} — ${fmtDateShort(r.date)}`;
-    const mailBody = `Hi${name ? " " + name.split(" ")[0] : ""},\n\n${r.absentStaffName} is away on ${fmtDateLong(r.date)} and needs cover for: ${sess.text}${r.room ? " in " + r.room : ""}.\n${classesLines ? "\nClasses to cover:\n" + classesLines + "\n" : ""}\nReason: ${r.reason || "—"}\n${r.notes ? "Notes: " + r.notes + "\n" : ""}\nPlease remember to attach the relief notes${r.notes ? "" : " (if the absent teacher has sent them)"} before sending this email — mailto links can't attach files automatically.\n\nThanks,\n${leaderFirst}\n${school}`;
+    const attachReminder = (r.attachments && r.attachments.length)
+      ? `Please remember to attach ${r.attachments.map(a=>a.name).join(", ")} before sending this email — mailto links can't attach files automatically, so download ${r.attachments.length === 1 ? "it" : "them"} from the app first.`
+      : `Please remember to attach the relief notes${r.notes ? "" : " (if the absent teacher has sent them)"} before sending this email — mailto links can't attach files automatically.`;
+    const mailBody = `Hi${name ? " " + name.split(" ")[0] : ""},\n\n${r.absentStaffName} is away on ${fmtDateLong(r.date)} and needs cover for: ${sess.text}${r.room ? " in " + r.room : ""}.\n${classesLines ? "\nClasses to cover:\n" + classesLines + "\n" : ""}\nReason: ${r.reason || "—"}\n${r.notes ? "Notes: " + r.notes + "\n" : ""}\n${attachReminder}\n\nThanks,\n${leaderFirst}\n${school}`;
     const mailto = `mailto:?subject=${encodeURIComponent(mailSubject)}&body=${encodeURIComponent(mailBody)}`;
     const contact = poolContactByName(name);
     return { smsText, mailBody, mailto, contact, name };
@@ -2064,6 +2147,11 @@ function openReliefOutputs(r){
         <button class="btn btn-primary" id="copyOutBtn">${icon("copy")} Copy text</button>
       </div>
       ${active === "SMS / message" && m.name && !(m.contact && m.contact.phone) ? `<div class="hint" style="margin-top:6px;">No phone on file for ${escapeHtml(m.name)} — add one in Team &amp; Files to enable "Open in Messages".</div>` : ""}
+      ${active === "Email draft" && r.attachments && r.attachments.length ? `
+        <div class="card" style="background:var(--accent-soft); border-color:var(--accent); margin-top:10px; padding:10px 12px;">
+          <div class="hint" style="margin-bottom:6px;"><code>mailto:</code> can't attach files automatically — download each one below, then drag it into the email window "Open in email" opens.</div>
+          <div>${attachmentLinksHtml(r.attachments)}</div>
+        </div>` : ""}
     `;
     tabsEl.querySelectorAll("[data-ok]").forEach(b => b.addEventListener("click", () => { active = b.dataset.ok; draw(); }));
     tabsEl.querySelectorAll("[data-reliever-idx]").forEach(b => b.addEventListener("click", () => { activeRelieverIdx = +b.dataset.relieverIdx; draw(); }));
