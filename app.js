@@ -2557,7 +2557,7 @@ function renderTasks(){
     <div class="card">
       <div class="card-head"><h2>${icon("plus")} New task</h2></div>
       <form id="taskForm" class="row" style="align-items:flex-end;">
-        <div class="field" style="flex:2;"><label for="tf-title">Title</label><input type="text" id="tf-title" required placeholder="What needs doing?"></div>
+        <div class="field" style="flex:2 1 200px;"><label for="tf-title">Title</label><input type="text" id="tf-title" required placeholder="What needs doing?"></div>
         <div class="field"><label for="tf-due">Due</label><input type="date" id="tf-due"></div>
         <div class="field"><label for="tf-assignee">Assignee</label>
           <select id="tf-assignee"><option value="">Me</option>${allStaffNames().map(n=>`<option>${escapeHtml(n)}</option>`).join("")}</select>
@@ -2719,7 +2719,7 @@ function renderTeamFiles(){
       </div>
       <div class="hint" style="margin-bottom:10px;">DECYP rules mean files can't be copied to Teams automatically. Track what needs to go up manually here — target: <strong>${escapeHtml(state.settings.teamsChannel)}</strong> (edit in Settings).</div>
       <form id="fileQueueForm" class="row" style="align-items:flex-end;">
-        <div class="field" style="flex:2;"><label for="fq-name">File / item</label><input type="text" id="fq-name" required placeholder="e.g. Term 3 Scope & Sequence.docx"></div>
+        <div class="field" style="flex:2 1 200px;"><label for="fq-name">File / item</label><input type="text" id="fq-name" required placeholder="e.g. Term 3 Scope & Sequence.docx"></div>
         <div class="field" style="flex:1;"><label for="fq-dest">Destination</label><input type="text" id="fq-dest" value="${escapeHtml(state.settings.teamsChannel)}"></div>
         <div class="field" style="align-self:flex-end;"><button class="btn btn-primary" type="submit">${icon("plus")} Add</button></div>
       </form>
