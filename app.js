@@ -2740,10 +2740,28 @@ function renderTeamFiles(){
     document.querySelectorAll("[data-view-teacher-tt]").forEach(b=>b.addEventListener("click",()=> showTeacherTimetable(b.dataset.viewTeacherTt)));
     document.querySelectorAll("[data-view-ta-tt]").forEach(b=>b.addEventListener("click",()=> showTaTimetable(b.dataset.viewTaTt)));
     document.querySelectorAll("[data-rm-teacher]").forEach(b=>b.addEventListener("click",()=>{
-      state.team.teachers = state.team.teachers.filter(p=>p.id!==b.dataset.rmTeacher); persist(); renderStaffLists();
+      if(!confirm("Remove this teacher? They'll disappear from the Absent staff member list, timetables, and task assignees.")) return;
+      const removedIdx = state.team.teachers.findIndex(p=>p.id===b.dataset.rmTeacher);
+      if(removedIdx === -1) return;
+      const [removed] = state.team.teachers.splice(removedIdx, 1);
+      persist(); renderStaffLists();
+      toast("Teacher removed.", { actionLabel: "Undo", onAction: () => {
+        state.team.teachers.splice(Math.min(removedIdx, state.team.teachers.length), 0, removed);
+        persist(); renderStaffLists();
+        toast("Restored.");
+      }});
     }));
     document.querySelectorAll("[data-rm-ta]").forEach(b=>b.addEventListener("click",()=>{
-      state.team.tas = state.team.tas.filter(p=>p.id!==b.dataset.rmTa); persist(); renderStaffLists();
+      if(!confirm("Remove this TA? They'll disappear from timetables and task assignees.")) return;
+      const removedIdx = state.team.tas.findIndex(p=>p.id===b.dataset.rmTa);
+      if(removedIdx === -1) return;
+      const [removed] = state.team.tas.splice(removedIdx, 1);
+      persist(); renderStaffLists();
+      toast("TA removed.", { actionLabel: "Undo", onAction: () => {
+        state.team.tas.splice(Math.min(removedIdx, state.team.tas.length), 0, removed);
+        persist(); renderStaffLists();
+        toast("Restored.");
+      }});
     }));
   }
   renderStaffLists();
