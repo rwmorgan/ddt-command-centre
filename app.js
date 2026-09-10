@@ -981,6 +981,14 @@ function renderPendingAttachments(){
 function renderRelief(){
   const root = document.getElementById("view-relief");
   const today = todayISO();
+  // Rebuilding the form below resets it to add-mode appearance, so the
+  // edit flag has to be cleared to match. Without this, starting an edit,
+  // switching tabs and coming back leaves a blank-looking "Log an absence"
+  // form that silently OVERWRITES the entry you'd been editing on submit.
+  // (populateReliefFormForEdit calls showTab() before setting the flag, so
+  // the normal edit path is unaffected.)
+  reliefEditingId = null;
+  reliefPendingAttachments = [];
 
   root.innerHTML = `
     <div class="grid grid-2">
@@ -1423,7 +1431,7 @@ function renderReliefPool(filter=""){
 
   const rowHtml = p => `<tr>
       <td>
-        ${!p.isTeam ? `<button type="button" class="icon-btn star-btn ${p.favorite ? "is-favorite" : ""}" data-fav-toggle="${p.id}" title="${p.favorite ? "Unpin from top" : "Pin to top"}" style="width:22px;height:22px;padding:2px;vertical-align:-5px;">${starIcon(!!p.favorite)}</button>` : ""}
+        ${!p.isTeam ? `<button type="button" class="icon-btn star-btn ${p.favorite ? "is-favorite" : ""}" data-fav-toggle="${p.id}" title="${p.favorite ? "Unpin from top" : "Pin to top"}">${starIcon(!!p.favorite)}</button>` : ""}
         ${escapeHtml(p.firstName)}${p.isTeam ? ` <span class="badge badge-muted">Team</span>` : ""}
       </td>
       <td>${escapeHtml(p.lastName)}</td>
@@ -2551,20 +2559,32 @@ function printMeetingMinutes(m){
 /* ---------------------------------------------------------------------- */
 /* TASKS                                                                  */
 /* ---------------------------------------------------------------------- */
+let taskEditingId = null; // when set, the "New task" form is editing that task instead of adding
+
 function renderTasks(){
   const root = document.getElementById("view-tasks");
+  taskEditingId = null; // see the matching note in renderRelief()
   root.innerHTML = `
     <div class="card">
-      <div class="card-head"><h2>${icon("plus")} New task</h2></div>
-      <form id="taskForm" class="row" style="align-items:flex-end;">
-        <div class="field" style="flex:2 1 200px;"><label for="tf-title">Title</label><input type="text" id="tf-title" required placeholder="What needs doing?"></div>
-        <div class="field"><label for="tf-due">Due</label><input type="date" id="tf-due"></div>
-        <div class="field"><label for="tf-assignee">Assignee</label>
-          <select id="tf-assignee"><option value="">Me</option>${allStaffNames().map(n=>`<option>${escapeHtml(n)}</option>`).join("")}</select>
+      <div class="card-head">
+        <h2 id="taskFormHeading">${icon("plus")} New task</h2>
+        <button type="button" class="btn btn-sm" id="taskCancelEditBtn" style="display:none;">Cancel edit</button>
+      </div>
+      <form id="taskForm">
+        <div class="row" style="align-items:flex-end;">
+          <div class="field" style="flex:2 1 200px;"><label for="tf-title">Title</label><input type="text" id="tf-title" required placeholder="What needs doing?"></div>
+          <div class="field"><label for="tf-due">Due</label><input type="date" id="tf-due"></div>
+          <div class="field"><label for="tf-assignee">Assignee</label>
+            <select id="tf-assignee"><option value="">Me</option>${allStaffNames().map(n=>`<option>${escapeHtml(n)}</option>`).join("")}</select>
+          </div>
+          <div class="field" id="tf-repeat-wrap"><label class="checkline" title="Needs a due date to repeat from"><input type="checkbox" id="tf-repeat"> Repeat weekly</label></div>
+          <div class="field" id="tf-repeat-until-wrap" style="display:none;"><label for="tf-repeat-until">Until</label><input type="date" id="tf-repeat-until"></div>
         </div>
-        <div class="field"><label class="checkline" title="Needs a due date to repeat from"><input type="checkbox" id="tf-repeat"> Repeat weekly</label></div>
-        <div class="field" id="tf-repeat-until-wrap" style="display:none;"><label for="tf-repeat-until">Until</label><input type="date" id="tf-repeat-until"></div>
-        <div class="field" style="align-self:flex-end;"><button class="btn btn-primary" type="submit">${icon("plus")} Add</button></div>
+        <div class="field">
+          <label for="tf-notes">Notes (optional)</label>
+          <textarea id="tf-notes" placeholder="Any detail worth keeping with this task…"></textarea>
+        </div>
+        <button class="btn btn-primary" type="submit" id="taskSubmitBtn">${icon("plus")} Add task</button>
       </form>
     </div>
 
@@ -2588,6 +2608,7 @@ function renderTasks(){
   document.getElementById("tf-repeat").addEventListener("change", e => {
     document.getElementById("tf-repeat-until-wrap").style.display = e.target.checked ? "" : "none";
   });
+  document.getElementById("taskCancelEditBtn").addEventListener("click", resetTaskFormToAddMode);
 
   document.getElementById("taskForm").addEventListener("submit", e => {
     e.preventDefault();
@@ -2595,6 +2616,24 @@ function renderTasks(){
     if(!title) return;
     const due = document.getElementById("tf-due").value;
     const assignee = document.getElementById("tf-assignee").value;
+    const notes = document.getElementById("tf-notes").value.trim();
+
+    // Editing an existing task updates it in place. Repeat-weekly is
+    // deliberately unavailable here (and hidden) -- it generates a run of
+    // NEW tasks, which isn't a meaningful thing to do while editing one.
+    if(taskEditingId){
+      const existing = state.tasks.find(x => x.id === taskEditingId);
+      if(existing){
+        Object.assign(existing, { title, due, assignee, notes });
+        persist();
+        toast("Task updated.");
+        resetTaskFormToAddMode();
+        renderTaskList();
+        return;
+      }
+      taskEditingId = null;
+    }
+
     const repeatCb = document.getElementById("tf-repeat");
     const repeatUntil = repeatCb.checked ? document.getElementById("tf-repeat-until").value : "";
 
@@ -2606,19 +2645,53 @@ function renderTasks(){
       const d = new Date(due + "T00:00:00");
       const end = new Date(repeatUntil + "T00:00:00");
       while(d <= end){ dates.push(todayISO(d)); d.setDate(d.getDate()+7); }
-      const created = dates.map(dueDate => ({ id: uid(), title, notes:"", due: dueDate, assignee, status:"open", createdAt: new Date().toISOString() }));
+      const created = dates.map(dueDate => ({ id: uid(), title, notes, due: dueDate, assignee, status:"open", createdAt: new Date().toISOString() }));
       state.tasks.unshift(...created);
       persist();
       toast(`${created.length} tasks added, weekly ${fmtDateShort(dates[0])}–${fmtDateShort(dates[dates.length-1])}.`);
-      e.target.reset(); document.getElementById("tf-repeat-until-wrap").style.display = "none"; renderTaskList();
+      resetTaskFormToAddMode(); renderTaskList();
       return;
     }
 
-    state.tasks.unshift({ id: uid(), title, notes:"", due, assignee, status:"open", createdAt: new Date().toISOString() });
-    persist(); toast("Task added."); e.target.reset(); document.getElementById("tf-repeat-until-wrap").style.display = "none"; renderTaskList();
+    state.tasks.unshift({ id: uid(), title, notes, due, assignee, status:"open", createdAt: new Date().toISOString() });
+    persist(); toast("Task added."); resetTaskFormToAddMode(); renderTaskList();
   });
   document.getElementById("taskFilter").addEventListener("change", renderTaskList);
   renderTaskList();
+}
+
+/** Puts the task form back into "add a new one" mode -- also the single
+ * place the form is cleared after a successful add, so the repeat-weekly
+ * fields can't be left half-set from a previous entry. */
+function resetTaskFormToAddMode(){
+  taskEditingId = null;
+  const form = document.getElementById("taskForm");
+  if(!form) return;
+  form.reset();
+  document.getElementById("taskFormHeading").innerHTML = `${icon("plus")} New task`;
+  document.getElementById("taskSubmitBtn").innerHTML = `${icon("plus")} Add task`;
+  document.getElementById("taskCancelEditBtn").style.display = "none";
+  document.getElementById("tf-repeat-wrap").style.display = "";
+  document.getElementById("tf-repeat-until-wrap").style.display = "none";
+}
+
+/** Loads an existing task into the same form and switches it to edit mode,
+ * mirroring how relief entries are edited. Repeat-weekly is hidden here
+ * since it creates a run of new tasks rather than changing this one. */
+function populateTaskFormForEdit(t){
+  showTab("tasks");
+  taskEditingId = t.id;
+  document.getElementById("tf-title").value = t.title || "";
+  document.getElementById("tf-due").value = t.due || "";
+  document.getElementById("tf-assignee").value = t.assignee || "";
+  document.getElementById("tf-notes").value = t.notes || "";
+  document.getElementById("tf-repeat").checked = false;
+  document.getElementById("tf-repeat-wrap").style.display = "none";
+  document.getElementById("tf-repeat-until-wrap").style.display = "none";
+  document.getElementById("taskFormHeading").innerHTML = `${icon("edit")} Edit task`;
+  document.getElementById("taskSubmitBtn").innerHTML = `${icon("check")} Save changes`;
+  document.getElementById("taskCancelEditBtn").style.display = "";
+  document.getElementById("taskForm").scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function renderTaskList(){
@@ -2646,8 +2719,12 @@ function renderTaskList(){
           ${overdue ? `<span class="badge badge-flag">Overdue</span>` : ""}
           ${t.assignee ? ` · ${escapeHtml(t.assignee)}` : " · Me"}
         </div>
+        ${t.notes ? `<div class="item-sub hint">${escapeHtml(t.notes)}</div>` : ""}
       </div>
-      <div class="item-actions"><button class="btn btn-sm btn-danger" data-del-task="${t.id}">${icon("trash")}</button></div>
+      <div class="item-actions">
+        <button class="btn btn-sm" data-edit-task="${t.id}">${icon("edit")} Edit</button>
+        <button class="btn btn-sm btn-danger" data-del-task="${t.id}">${icon("trash")}</button>
+      </div>
     </div>`;
   }).join("");
 
@@ -2655,10 +2732,17 @@ function renderTaskList(){
     const t = state.tasks.find(x=>x.id===cb.dataset.toggleTask);
     t.status = cb.checked ? "done" : "open"; persist(); renderTaskList();
   }));
+  box.querySelectorAll("[data-edit-task]").forEach(b => b.addEventListener("click", () => {
+    const t = state.tasks.find(x => x.id === b.dataset.editTask);
+    if(t) populateTaskFormForEdit(t);
+  }));
   box.querySelectorAll("[data-del-task]").forEach(b => b.addEventListener("click", () => {
     const removedIdx = state.tasks.findIndex(x => x.id === b.dataset.delTask);
     if(removedIdx === -1) return;
     const [removed] = state.tasks.splice(removedIdx, 1);
+    // Deleting the very task that's loaded in the form would leave it
+    // stuck showing "Edit task" for something that no longer exists.
+    if(taskEditingId === removed.id) resetTaskFormToAddMode();
     persist(); renderTaskList();
     toast("Task removed.", { actionLabel: "Undo", onAction: () => {
       state.tasks.splice(Math.min(removedIdx, state.tasks.length), 0, removed);
@@ -2720,7 +2804,7 @@ function renderTeamFiles(){
       <div class="hint" style="margin-bottom:10px;">DECYP rules mean files can't be copied to Teams automatically. Track what needs to go up manually here — target: <strong>${escapeHtml(state.settings.teamsChannel)}</strong> (edit in Settings).</div>
       <form id="fileQueueForm" class="row" style="align-items:flex-end;">
         <div class="field" style="flex:2 1 200px;"><label for="fq-name">File / item</label><input type="text" id="fq-name" required placeholder="e.g. Term 3 Scope & Sequence.docx"></div>
-        <div class="field" style="flex:1;"><label for="fq-dest">Destination</label><input type="text" id="fq-dest" value="${escapeHtml(state.settings.teamsChannel)}"></div>
+        <div class="field" style="flex:1 1 200px;"><label for="fq-dest">Destination</label><input type="text" id="fq-dest" value="${escapeHtml(state.settings.teamsChannel)}"></div>
         <div class="field" style="align-self:flex-end;"><button class="btn btn-primary" type="submit">${icon("plus")} Add</button></div>
       </form>
       <div id="fileQueueList" class="list section-gap"></div>
@@ -2833,7 +2917,7 @@ function renderTeamFiles(){
       </tr></thead>
       <tbody>${rows.map(p => `<tr>
         <td>
-          <button type="button" class="icon-btn star-btn ${p.favorite ? "is-favorite" : ""}" data-pool-fav-toggle="${p.id}" title="${p.favorite ? "Unpin from top of Relief directory" : "Pin to top of Relief directory"}" style="width:22px;height:22px;padding:2px;vertical-align:-5px;">${starIcon(!!p.favorite)}</button>
+          <button type="button" class="icon-btn star-btn ${p.favorite ? "is-favorite" : ""}" data-pool-fav-toggle="${p.id}" title="${p.favorite ? "Unpin from top of Relief directory" : "Pin to top of Relief directory"}">${starIcon(!!p.favorite)}</button>
           ${escapeHtml(p.firstName)}
         </td>
         <td>${escapeHtml(p.lastName)}</td>
@@ -2978,8 +3062,8 @@ function renderSettings(){
       <div class="card-head"><h2>Quick launch links</h2></div>
       <div id="qlEditor" class="list"></div>
       <div class="row section-gap">
-        <input type="text" id="ql-new-label" placeholder="Label" style="flex:1;">
-        <input type="url" id="ql-new-url" placeholder="https://…" style="flex:2;">
+        <input type="text" id="ql-new-label" placeholder="Label" style="flex:1 1 140px;">
+        <input type="url" id="ql-new-url" placeholder="https://…" style="flex:2 1 200px;">
         <button class="btn" id="ql-add-btn">${icon("plus")} Add</button>
       </div>
     </div>

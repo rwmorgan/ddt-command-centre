@@ -325,7 +325,9 @@ th.sortable:hover { color: var(--accent); }
 .chip.chip-clear { background: transparent; border-style: dashed; color: var(--muted); }
 
 /* ---------- favourite/pin star ---------- */
-.star-btn { color: var(--muted); background: transparent; border-color: transparent; }
+/* Sizing lives here rather than inline so the phone breakpoint can grow the
+   tap target -- an inline style would win over any media query. */
+.star-btn { color: var(--muted); background: transparent; border-color: transparent; width: 22px; height: 22px; padding: 2px; vertical-align: -5px; }
 .star-btn:hover { color: var(--amber); background: var(--amber-soft); }
 .star-btn.is-favorite { color: var(--amber); }
 
@@ -435,6 +437,16 @@ footer.app-foot {
   .checkline { font-size: 15px; }
   .btn { font-size: 15px; padding: 10px 15px; }
   .btn-sm { font-size: 13.5px; padding: 7px 12px; }
+
+  /* Touch targets. Fingers aren't mouse pointers -- these are all comfortably
+     tappable with a mouse at 22-30px but genuinely fiddly on a phone, and
+     mis-tapping a star silently pins/unpins the wrong person. */
+  .btn-sm, .icon-btn { min-height: 38px; }
+  .star-btn { width: 38px; height: 38px; padding: 8px; vertical-align: -12px; }
+  .star-btn .mini-icon { width: 19px !important; height: 19px !important; }
+  /* Clickable staff names (open a timetable) and inline contact links. */
+  [data-view-teacher-tt], [data-view-ta-tt] { min-height: 38px; display: flex; align-items: center; }
+  .item-sub a, td a { display: inline-block; padding: 6px 0; }
   .badge { font-size: 12.5px; padding: 4px 9px; }
   .chip { font-size: 13px; padding: 6px 12px; }
   .item-title { font-size: 15px; }
