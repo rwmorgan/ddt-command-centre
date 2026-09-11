@@ -616,6 +616,129 @@ function showTab(id){
 /* ---------------------------------------------------------------------- */
 /* DASHBOARD                                                              */
 /* ---------------------------------------------------------------------- */
+/** Things that look like they've been forgotten -- derived entirely from
+ * data already in state, no guessing and no AI. Each item says what's
+ * wrong, how urgent it is, and which tab fixes it. Returns [] when there's
+ * genuinely nothing to flag, so the dashboard can show an "all clear".
+ *
+ * Deliberately NOT flagged: optional fields left blank (room, notes, a
+ * meeting with no minutes yet today). Nagging about optional things is how
+ * an attention panel turns into wallpaper people stop reading. */
+function collectAttentionItems(){
+  const today = todayISO();
+  const items = [];
+  const horizon = new Date(today + "T00:00:00");
+  horizon.setDate(horizon.getDate() + 7);
+  const horizonISO = todayISO(horizon);
+
+  // --- Relief with nobody assigned, or only partly covered ---------------
+  state.relief.log
+    .filter(r => r.date >= today && r.date <= horizonISO)
+    .sort((a,b) => a.date.localeCompare(b.date))
+    .forEach(r => {
+      const isToday = r.date === today;
+      const when = isToday ? "today" : fmtDateShort(r.date);
+      const groups = relieverGroupsFor(r);
+
+      if(!groups.length){
+        items.push({
+          severity: isToday ? 0 : 2,
+          title: `${r.absentStaffName} has no relief assigned`,
+          detail: `${when} · ${r.type === "duty" ? "Duty" : r.type === "full-day" ? "Full day" : sessionLabelList(r.sessions)}`,
+          tab: "relief",
+        });
+        return;
+      }
+
+      // Split coverage can leave individual sessions quietly uncovered.
+      if(r.type === "sessions" && r.relievers && r.relievers.length){
+        const covered = new Set();
+        r.relievers.forEach(g => (g.sessions || []).forEach(i => covered.add(i)));
+        const missing = (r.sessions || []).filter(i => !covered.has(i));
+        if(missing.length){
+          items.push({
+            severity: isToday ? 1 : 3,
+            title: `${r.absentStaffName} is only partly covered`,
+            detail: `${when} · no relief for ${sessionLabelList(missing)}`,
+            tab: "relief",
+          });
+        }
+      }
+    });
+
+  // --- Overdue tasks -----------------------------------------------------
+  const overdue = state.tasks
+    .filter(t => t.status !== "done" && t.due && t.due < today)
+    .sort((a,b) => a.due.localeCompare(b.due));
+  overdue.slice(0, 4).forEach(t => {
+    items.push({
+      severity: 4,
+      title: `Overdue: ${t.title}`,
+      detail: `Was due ${fmtDateShort(t.due)}${t.assignee ? " · " + t.assignee : ""}`,
+      tab: "tasks",
+    });
+  });
+  if(overdue.length > 4){
+    items.push({ severity: 4, title: `+ ${overdue.length - 4} more overdue task${overdue.length - 4 === 1 ? "" : "s"}`, detail: "", tab: "tasks" });
+  }
+
+  // --- Meetings that happened but were never written up ------------------
+  const writeUpCutoff = new Date(today + "T00:00:00");
+  writeUpCutoff.setDate(writeUpCutoff.getDate() - 14);
+  const cutoffISO = todayISO(writeUpCutoff);
+  state.meetings.items
+    .filter(m => m.date < today && m.date >= cutoffISO && !(m.minutes || "").trim())
+    .sort((a,b) => a.date.localeCompare(b.date))
+    .forEach(m => {
+      items.push({
+        severity: 5,
+        title: `No minutes recorded for ${m.type}`,
+        detail: `${fmtDateShort(m.date)}${m.focus ? " · " + m.focus : ""}`,
+        tab: "meetings",
+      });
+    });
+
+  // --- Meeting actions still open and never pushed to Tasks --------------
+  // Once pushed they live in Tasks and would surface as overdue there, so
+  // only the never-pushed ones are genuinely at risk of being forgotten.
+  state.meetings.items
+    .filter(m => m.date < today)
+    .forEach(m => {
+      const stranded = (m.actions || []).filter(a => !a.done && !a.pushedToTasks);
+      if(stranded.length){
+        items.push({
+          severity: 6,
+          title: `${stranded.length} open action${stranded.length === 1 ? "" : "s"} from ${m.type}`,
+          detail: `${fmtDateShort(m.date)} · not yet in Tasks`,
+          tab: "meetings",
+        });
+      }
+    });
+
+  return items.sort((a,b) => a.severity - b.severity);
+}
+
+function attentionPanelHtml(){
+  const items = collectAttentionItems();
+  if(!items.length){
+    return `<div class="card section-gap attention-clear">
+      <div class="row" style="gap:8px; align-items:center;">
+        ${icon("check", "mini-icon")}<span class="hint">Nothing needs attention — all absences covered, no overdue tasks.</span>
+      </div>
+    </div>`;
+  }
+  return `<div class="card section-gap attention-card">
+    <div class="card-head"><h2>${icon("alert")} Needs attention <span class="badge badge-flag">${items.length}</span></h2></div>
+    <div class="list">${items.map((it,i) => `
+      <div class="item attention-item" data-attention="${i}" style="cursor:pointer;">
+        <div class="item-main">
+          <div class="item-title">${escapeHtml(it.title)}</div>
+          ${it.detail ? `<div class="item-sub mono">${escapeHtml(it.detail)}</div>` : ""}
+        </div>
+      </div>`).join("")}</div>
+  </div>`;
+}
+
 function renderDashboard(){
   const root = document.getElementById("view-dashboard");
   const today = todayISO();
@@ -659,6 +782,8 @@ function renderDashboard(){
       <div><dt>Rotation Today</dt><dd class="mono">${dayKey ? escapeHtml(lineSummary) : "Weekend"}</dd></div>
       <div><dt>Learning Area</dt><dd>${escapeHtml(state.meta.learningArea)}</dd></div>
     </dl>
+
+    ${attentionPanelHtml()}
 
     <div class="card section-gap">
       <div class="card-head"><h2>${icon("calendar")} This week at a glance</h2></div>
@@ -737,6 +862,11 @@ function renderDashboard(){
     state.scratchpad = e.target.value; persist();
   });
   root.querySelectorAll("[data-goto]").forEach(b => b.addEventListener("click", () => showTab(b.dataset.goto)));
+  const attentionItems = collectAttentionItems();
+  root.querySelectorAll("[data-attention]").forEach(el => el.addEventListener("click", () => {
+    const it = attentionItems[+el.dataset.attention];
+    if(it) showTab(it.tab);
+  }));
   root.querySelectorAll("[data-open-dash-meeting]").forEach(el => el.addEventListener("click", () => {
     showTab("meetings");
     openMeetingDetail(el.dataset.openDashMeeting);
@@ -1033,6 +1163,7 @@ function renderRelief(){
             <div class="hint">Based on the rotation for the selected date.</div>
           </div>
           <div id="rf-classes-panel"></div>
+          <div id="rf-suggest-panel"></div>
           <div class="row">
             <div class="field">
               <label for="rf-room">Room (optional)</label>
@@ -1142,6 +1273,7 @@ function renderRelief(){
   staffSel.addEventListener("change", () => {
     document.getElementById("rf-staff-other-wrap").style.display = staffSel.value === "__other" ? "" : "none";
     renderClassesPanel();
+    renderReliefSuggestions();
   });
 
   const dateInput = document.getElementById("rf-date");
@@ -1237,14 +1369,15 @@ function renderRelief(){
       toast(`${b.dataset.suggestRelief} set as relief.`);
     }));
   }
-  dateInput.addEventListener("change", () => { renderSessionCheckboxes(); renderClassesPanel(); });
-  typeSel.addEventListener("change", renderSessionCheckboxes);
+  dateInput.addEventListener("change", () => { renderSessionCheckboxes(); renderClassesPanel(); renderReliefSuggestions(); });
+  typeSel.addEventListener("change", () => { renderSessionCheckboxes(); renderReliefSuggestions(); });
   document.getElementById("rf-sessions").addEventListener("change", e => {
-    if(e.target.classList.contains("rf-sess-cb")) renderSessionRelieverInputs();
+    if(e.target.classList.contains("rf-sess-cb")){ renderSessionRelieverInputs(); renderReliefSuggestions(); }
   });
   document.getElementById("rf-split-relief").addEventListener("change", renderSessionRelieverInputs);
   renderSessionCheckboxes();
   renderClassesPanel();
+  renderReliefSuggestions();
   renderPendingAttachments();
 
   document.getElementById("rf-attachments").addEventListener("change", e => {
@@ -1392,6 +1525,147 @@ function renderRelief(){
   });
   document.getElementById("exportReliefCsvBtn").addEventListener("click", exportReliefLogCsv);
   document.getElementById("reliefDirSearch").addEventListener("input", e => renderReliefPool(e.target.value));
+}
+
+/** Loose word-level match between a class subject ("Game Making and
+ * Design", "Automotive") and a relief contact's free-text subject tags
+ * ("Design Tech/Auto", "VET;Technologies"). Exact string equality is
+ * useless here because the two lists were written by different people for
+ * different purposes, so this compares word sets and allows a prefix match
+ * on words of 4+ characters ("auto" matches "automotive"). Fuzzy by
+ * design -- it feeds a ranking, never a hard filter. */
+const SUBJECT_STOPWORDS = new Set(["and","the","of","or","a","to","in","for","with","level","1","2","3","4"]);
+function subjectWords(s){
+  return String(s || "").toLowerCase().split(/[^a-z0-9]+/)
+    .filter(w => w && !SUBJECT_STOPWORDS.has(w));
+}
+function subjectsOverlap(classSubject, contactSubjects){
+  const a = subjectWords(classSubject);
+  const b = tokenizeSubjects(contactSubjects).flatMap(subjectWords);
+  if(!a.length || !b.length) return false;
+  return a.some(x => b.some(y =>
+    x === y || (x.length >= 4 && y.startsWith(x)) || (y.length >= 4 && x.startsWith(y))
+  ));
+}
+
+/** Does a contact's free-text availability mention this weekday?
+ * Returns "yes" (says any/every day, or names this day), "no" (names other
+ * days but not this one) or "unknown" (blank/unparseable). Three-way on
+ * purpose: "unknown" must not be penalised like a real clash. */
+const DAY_WORDS = { monday:["monday","mon"], tuesday:["tuesday","tue","tues"], wednesday:["wednesday","wed"], thursday:["thursday","thu","thurs"], friday:["friday","fri"] };
+function availabilityForDay(availability, dayKey){
+  const text = String(availability || "").toLowerCase();
+  if(!text.trim()) return "unknown";
+  if(/\b(any|every ?day|all days|any day)\b/.test(text)) return "yes";
+  const mine = DAY_WORDS[dayKey] || [];
+  if(mine.some(w => new RegExp("\\b" + w + "\\b").test(text))) return "yes";
+  const namesAnyDay = Object.values(DAY_WORDS).flat().some(w => new RegExp("\\b" + w + "\\b").test(text));
+  return namesAnyDay ? "no" : "unknown";
+}
+
+/** Ranks relief candidates for a specific absence, with the reasoning
+ * attached so the suggestion can explain itself. Pure scoring over data
+ * already in state -- same inputs always give the same order, and it can
+ * never invent a person or a qualification. */
+function scoreReliefCandidates(absentName, dateISO, type, sessions){
+  const dayKey = dayKeyFromISO(dateISO);
+  if(!absentName || !dayKey) return [];
+
+  // What the absent teacher actually needs covered that day.
+  let classes = classesForTeacherToday(absentName, dayKey);
+  if(type === "sessions" && sessions && sessions.length) classes = classes.filter(c => sessions.includes(c.sessionIdx));
+  if(type === "duty") classes = [];
+  const affectedLines = new Set(classes.map(c => c.line));
+
+  // TAs who normally cover the affected lines that day.
+  const usualTAs = new Set();
+  classes.forEach(c => taGridFor(dayKey, c.sessionIdx)
+    .filter(t => t.line === c.line)
+    .forEach(t => usualTAs.add(t.ta.toLowerCase())));
+
+  const scored = reliefCandidateObjects()
+    .filter(c => c.name.toLowerCase() !== absentName.toLowerCase()) // never suggest the absent person
+    .map(c => {
+      const uses = state.relief.log.filter(r => allRelieverNames(r).includes(c.name));
+      const last = uses.map(u => u.date).sort().pop();
+      let score = 0;
+      const reasons = [];
+
+      if(usualTAs.has(c.name.toLowerCase())){
+        score += 50;
+        reasons.push("usually covers this line");
+      }
+
+      const matched = classes.find(cl => subjectsOverlap(cl.subject, c.subjects));
+      if(matched){ score += 30; reasons.push(`covers ${matched.subject}`); }
+      else if(hasAnySubjectTag(c.subjects)){ score += 15; reasons.push("covers any subject"); }
+
+      const avail = availabilityForDay(c.availability, dayKey);
+      if(avail === "yes"){ score += 20; reasons.push(`available ${DAY_LABEL[dayKey]}`); }
+      else if(avail === "no"){ score -= 12; reasons.push(`usually not available ${DAY_LABEL[dayKey]}`); }
+
+      if(!uses.length){ score += 15; reasons.push("not used yet"); }
+      else {
+        const weeks = Math.floor((new Date(dateISO) - new Date(last)) / (7*86400000));
+        score += Math.max(0, Math.min(15, weeks * 3));
+        score -= Math.min(10, uses.length * 2);
+        reasons.push(`last used ${fmtDateShort(last)}`);
+      }
+
+      if(c.favorite){ score += 5; reasons.push("pinned"); }
+
+      return { ...c, score, reasons, unavailable: isCurrentlyUnavailable(c) };
+    });
+
+  // Unavailable contacts are excluded rather than ranked low -- suggesting
+  // someone you've explicitly marked as away is worse than no suggestion.
+  return scored
+    .filter(c => !c.unavailable)
+    .sort((a,b) => b.score - a.score || a.name.localeCompare(b.name));
+}
+
+/** The "suggested relief" panel under the absence form. Hidden entirely
+ * when there's nothing useful to say (no teacher/date picked yet). */
+function renderReliefSuggestions(){
+  const box = document.getElementById("rf-suggest-panel");
+  if(!box) return;
+  const staffSel = document.getElementById("rf-staff");
+  const name = staffSel.value === "__other" ? "" : staffSel.value;
+  const dateISO = document.getElementById("rf-date").value;
+  const type = document.getElementById("rf-type").value;
+  const sessions = [...document.querySelectorAll(".rf-sess-cb:checked")].map(cb => +cb.value);
+
+  if(!name || !dateISO){ box.innerHTML = ""; return; }
+  const ranked = scoreReliefCandidates(name, dateISO, type, sessions).slice(0, 3);
+  if(!ranked.length){ box.innerHTML = ""; return; }
+
+  box.innerHTML = `
+    <div class="card" style="background:var(--surface-2); margin-bottom:14px;">
+      <h3 style="margin-bottom:8px;">${icon("spark","mini-icon")} Suggested relief</h3>
+      <div class="list">${ranked.map((c,i) => `
+        <div class="item" style="padding:8px 10px;">
+          <div class="item-main">
+            <div class="item-title">${i+1}. ${escapeHtml(c.name)}</div>
+            <div class="item-sub hint">${escapeHtml(c.reasons.join(" · ") || "no matching details on file")}</div>
+          </div>
+          <div class="item-actions"><button type="button" class="btn btn-sm" data-suggest-pick="${escapeHtml(c.name)}">Use</button></div>
+        </div>`).join("")}</div>
+      <div class="hint" style="margin-top:6px;">Ranked on subject match, who normally covers this line, availability and who's been used least recently. Anyone marked unavailable is left out.</div>
+    </div>`;
+
+  box.querySelectorAll("[data-suggest-pick]").forEach(b => b.addEventListener("click", () => {
+    const picked = b.dataset.suggestPick;
+    const splitCb = document.getElementById("rf-split-relief");
+    if(splitCb && splitCb.checked){
+      // In split mode, fill the first session input still left blank.
+      const blank = [...document.querySelectorAll("#rf-session-relievers [data-sess-relief]")].find(inp => !inp.value.trim());
+      if(blank){ blank.value = picked; toast(`${picked} added for ${blank.previousElementSibling ? blank.previousElementSibling.textContent.trim().split(" ")[0] : "that session"}.`); return; }
+      toast("Every session already has someone assigned.");
+      return;
+    }
+    document.getElementById("rf-relief").value = picked;
+    toast(`${picked} set as relief.`);
+  }));
 }
 
 function renderReliefPool(filter=""){

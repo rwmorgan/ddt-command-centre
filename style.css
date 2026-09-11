@@ -324,6 +324,14 @@ th.sortable:hover { color: var(--accent); }
 .chip.chip-active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .chip.chip-clear { background: transparent; border-style: dashed; color: var(--muted); }
 
+/* ---------- dashboard "needs attention" panel ---------- */
+.attention-card { border-color: var(--flag); border-left-width: 3px; }
+.attention-card .badge-flag { margin-left: 6px; vertical-align: 2px; }
+.attention-item { transition: background .12s; border-radius: var(--radius-sm); }
+.attention-item:hover { background: var(--accent-soft); }
+.attention-clear { padding: 10px 16px; }
+.attention-clear .mini-icon { stroke: var(--accent); flex: none; }
+
 /* ---------- favourite/pin star ---------- */
 /* Sizing lives here rather than inline so the phone breakpoint can grow the
    tap target -- an inline style would win over any media query. */
