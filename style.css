@@ -331,6 +331,10 @@ th.sortable:hover { color: var(--accent); }
 .attention-item:hover { background: var(--accent-soft); }
 .attention-clear { padding: 10px 16px; }
 .attention-clear .mini-icon { stroke: var(--accent); flex: none; }
+/* Stays faint until you're on the row, so it doesn't read as a delete. */
+.attention-clear-btn { width: 28px; height: 28px; opacity: .45; border-color: transparent; background: transparent; }
+.attention-item:hover .attention-clear-btn { opacity: 1; }
+.attention-clear-btn:hover { border-color: var(--border-strong); background: var(--surface-2); }
 
 /* ---------- favourite/pin star ---------- */
 /* Sizing lives here rather than inline so the phone breakpoint can grow the
@@ -442,6 +446,20 @@ footer.app-foot {
     font-size: 16px; /* also avoids auto-zoom-on-focus on iOS Safari */
     padding: 10px 12px;
   }
+  /* Today's sessions: on a narrow screen the fixed 118px time column plus
+     an "N away" badge AND an "N classes" badge can't fit on one line, and
+     the trailing icon renders past the right edge. Give the line name its
+     own row instead of letting the last column overflow. */
+  .session-row {
+    grid-template-columns: 30px 1fr auto;
+    grid-template-areas: "badge time meta" "line line line";
+    row-gap: 4px;
+  }
+  .session-row > :nth-child(1) { grid-area: badge; }
+  .session-row > :nth-child(2) { grid-area: time; }
+  .session-row > :nth-child(3) { grid-area: line; }
+  .session-row > :nth-child(4) { grid-area: meta; justify-self: end; }
+
   .checkline { font-size: 15px; }
   .btn { font-size: 15px; padding: 10px 15px; }
   .btn-sm { font-size: 13.5px; padding: 7px 12px; }

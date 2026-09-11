@@ -150,6 +150,12 @@ function defaultState(){
       { label: "Claude", url: "https://claude.ai/", icon: "spark", appScheme: "claude://" },
     ],
     scratchpad: "",
+    // Keys of "Needs attention" items you've explicitly cleared. Each key
+    // encodes the *situation* being dismissed, not just the record id, so
+    // if the situation materially changes (an extra session goes uncovered,
+    // a task gets rescheduled) it counts as a new item and comes back.
+    // Stale keys are pruned automatically -- see pruneAttentionDismissals.
+    dismissedAttention: [],
   };
 }
 
@@ -642,6 +648,7 @@ function collectAttentionItems(){
 
       if(!groups.length){
         items.push({
+          key: `relief-none:${r.id}`,
           severity: isToday ? 0 : 2,
           title: `${r.absentStaffName} has no relief assigned`,
           detail: `${when} · ${r.type === "duty" ? "Duty" : r.type === "full-day" ? "Full day" : sessionLabelList(r.sessions)}`,
@@ -657,6 +664,9 @@ function collectAttentionItems(){
         const missing = (r.sessions || []).filter(i => !covered.has(i));
         if(missing.length){
           items.push({
+            // Which sessions are missing is part of the key -- covering one
+            // of them changes the situation, so it should surface again.
+            key: `relief-partial:${r.id}:${missing.slice().sort((a,b)=>a-b).join(",")}`,
             severity: isToday ? 1 : 3,
             title: `${r.absentStaffName} is only partly covered`,
             detail: `${when} · no relief for ${sessionLabelList(missing)}`,
@@ -672,6 +682,8 @@ function collectAttentionItems(){
     .sort((a,b) => a.due.localeCompare(b.due));
   overdue.slice(0, 4).forEach(t => {
     items.push({
+      // Due date in the key, so rescheduling a task un-dismisses it.
+      key: `task-overdue:${t.id}:${t.due}`,
       severity: 4,
       title: `Overdue: ${t.title}`,
       detail: `Was due ${fmtDateShort(t.due)}${t.assignee ? " · " + t.assignee : ""}`,
@@ -691,6 +703,7 @@ function collectAttentionItems(){
     .sort((a,b) => a.date.localeCompare(b.date))
     .forEach(m => {
       items.push({
+        key: `meeting-minutes:${m.id}`,
         severity: 5,
         title: `No minutes recorded for ${m.type}`,
         detail: `${fmtDateShort(m.date)}${m.focus ? " · " + m.focus : ""}`,
@@ -707,6 +720,7 @@ function collectAttentionItems(){
       const stranded = (m.actions || []).filter(a => !a.done && !a.pushedToTasks);
       if(stranded.length){
         items.push({
+          key: `meeting-actions:${m.id}:${stranded.length}`,
           severity: 6,
           title: `${stranded.length} open action${stranded.length === 1 ? "" : "s"} from ${m.type}`,
           detail: `${fmtDateShort(m.date)} · not yet in Tasks`,
@@ -718,24 +732,86 @@ function collectAttentionItems(){
   return items.sort((a,b) => a.severity - b.severity);
 }
 
+function isAttentionDismissed(key){
+  return !!key && (state.dismissedAttention || []).includes(key);
+}
+
+/** Drops dismissal keys whose underlying situation no longer exists, so the
+ * list can't grow forever -- and so a condition that genuinely recurs comes
+ * back rather than staying silently cleared. Called with the full raw item
+ * list before anything is filtered out. */
+function pruneAttentionDismissals(rawItems){
+  const live = new Set(rawItems.map(i => i.key).filter(Boolean));
+  const before = (state.dismissedAttention || []).length;
+  state.dismissedAttention = (state.dismissedAttention || []).filter(k => live.has(k));
+  if(state.dismissedAttention.length !== before) persist();
+}
+
+function dismissAttentionItem(key){
+  if(!key || isAttentionDismissed(key)) return;
+  state.dismissedAttention = [...(state.dismissedAttention || []), key];
+  persist();
+  renderDashboard();
+  toast("Cleared from Needs attention.", { actionLabel: "Undo", onAction: () => {
+    restoreAttentionItem(key);
+    toast("Restored.");
+  }});
+}
+
+function restoreAttentionItem(key){
+  state.dismissedAttention = (state.dismissedAttention || []).filter(k => k !== key);
+  persist();
+  renderDashboard();
+}
+
+let attentionShowDismissed = false; // panel-local toggle, deliberately not persisted
+
 function attentionPanelHtml(){
-  const items = collectAttentionItems();
-  if(!items.length){
+  const raw = collectAttentionItems();
+  pruneAttentionDismissals(raw);
+  const active = raw.filter(it => !isAttentionDismissed(it.key));
+  const dismissed = raw.filter(it => isAttentionDismissed(it.key));
+
+  const dismissedFooter = dismissed.length ? `
+    <div class="hint" style="margin-top:10px; display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+      <button type="button" class="btn btn-sm btn-ghost" id="attentionToggleDismissed">
+        ${attentionShowDismissed ? "Hide" : "Show"} ${dismissed.length} cleared
+      </button>
+      ${attentionShowDismissed ? `<button type="button" class="btn btn-sm" id="attentionRestoreAll">Restore all</button>` : ""}
+    </div>
+    ${attentionShowDismissed ? `<div class="list" style="margin-top:8px; opacity:.62;">${dismissed.map(it => `
+      <div class="item">
+        <div class="item-main">
+          <div class="item-title">${escapeHtml(it.title)}</div>
+          ${it.detail ? `<div class="item-sub mono">${escapeHtml(it.detail)}</div>` : ""}
+        </div>
+        <div class="item-actions"><button type="button" class="btn btn-sm" data-attention-restore="${escapeHtml(it.key)}">Restore</button></div>
+      </div>`).join("")}</div>` : ""}` : "";
+
+  if(!active.length){
     return `<div class="card section-gap attention-clear">
       <div class="row" style="gap:8px; align-items:center;">
-        ${icon("check", "mini-icon")}<span class="hint">Nothing needs attention — all absences covered, no overdue tasks.</span>
+        ${icon("check", "mini-icon")}<span class="hint">Nothing needs attention${dismissed.length ? " that you haven't already cleared" : " — all absences covered, no overdue tasks"}.</span>
       </div>
+      ${dismissedFooter}
     </div>`;
   }
+
   return `<div class="card section-gap attention-card">
-    <div class="card-head"><h2>${icon("alert")} Needs attention <span class="badge badge-flag">${items.length}</span></h2></div>
-    <div class="list">${items.map((it,i) => `
+    <div class="card-head"><h2>${icon("alert")} Needs attention <span class="badge badge-flag">${active.length}</span></h2></div>
+    <div class="list">${active.map((it,i) => `
       <div class="item attention-item" data-attention="${i}" style="cursor:pointer;">
         <div class="item-main">
           <div class="item-title">${escapeHtml(it.title)}</div>
           ${it.detail ? `<div class="item-sub mono">${escapeHtml(it.detail)}</div>` : ""}
         </div>
+        ${it.key ? `<div class="item-actions">
+          <button type="button" class="icon-btn attention-clear-btn" data-attention-clear="${escapeHtml(it.key)}" title="Clear this — the underlying record is not touched" aria-label="Clear this item">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="mini-icon"><path d="M18 6 6 18M6 6l12 12"/></svg>
+          </button>
+        </div>` : ""}
       </div>`).join("")}</div>
+    ${dismissedFooter}
   </div>`;
 }
 
@@ -862,11 +938,31 @@ function renderDashboard(){
     state.scratchpad = e.target.value; persist();
   });
   root.querySelectorAll("[data-goto]").forEach(b => b.addEventListener("click", () => showTab(b.dataset.goto)));
-  const attentionItems = collectAttentionItems();
+  const attentionActive = collectAttentionItems().filter(it => !isAttentionDismissed(it.key));
   root.querySelectorAll("[data-attention]").forEach(el => el.addEventListener("click", () => {
-    const it = attentionItems[+el.dataset.attention];
+    const it = attentionActive[+el.dataset.attention];
     if(it) showTab(it.tab);
   }));
+  root.querySelectorAll("[data-attention-clear]").forEach(b => b.addEventListener("click", e => {
+    e.stopPropagation(); // the row itself navigates -- clearing must not
+    dismissAttentionItem(b.dataset.attentionClear);
+  }));
+  root.querySelectorAll("[data-attention-restore]").forEach(b => b.addEventListener("click", e => {
+    e.stopPropagation();
+    restoreAttentionItem(b.dataset.attentionRestore);
+  }));
+  const toggleDismissed = document.getElementById("attentionToggleDismissed");
+  if(toggleDismissed) toggleDismissed.addEventListener("click", () => {
+    attentionShowDismissed = !attentionShowDismissed;
+    renderDashboard();
+  });
+  const restoreAll = document.getElementById("attentionRestoreAll");
+  if(restoreAll) restoreAll.addEventListener("click", () => {
+    state.dismissedAttention = [];
+    persist();
+    renderDashboard();
+    toast("All cleared items restored.");
+  });
   root.querySelectorAll("[data-open-dash-meeting]").forEach(el => el.addEventListener("click", () => {
     showTab("meetings");
     openMeetingDetail(el.dataset.openDashMeeting);
