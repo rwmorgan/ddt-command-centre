@@ -1979,12 +1979,21 @@ function populateReliefFormForEdit(r){
 
   const staffSel = document.getElementById("rf-staff");
   const isKnownStaff = [...staffSel.options].some(o => o.value === r.absentStaffName);
-  staffSel.value = isKnownStaff ? r.absentStaffName : "__other";
-  staffSel.dispatchEvent(new Event("change"));
-  if(!isKnownStaff) document.getElementById("rf-staff-other").value = r.absentStaffName;
 
+  // Assign every plain value BEFORE dispatching any change event. The
+  // classes and suggestion panels are rendered by those handlers and both
+  // read the date field, so dispatching first rendered them against
+  // today's date instead of the entry's -- e.g. opening a Monday absence
+  // for edit on a Tuesday listed Tuesday's classes. (renderClassesPanel
+  // lives inside renderRelief's closure, so firing the event is the only
+  // way to reach it from here -- hence order matters rather than just
+  // calling it again afterwards.)
+  staffSel.value = isKnownStaff ? r.absentStaffName : "__other";
+  if(!isKnownStaff) document.getElementById("rf-staff-other").value = r.absentStaffName;
   document.getElementById("rf-date").value = r.date;
   document.getElementById("rf-type").value = r.type;
+
+  staffSel.dispatchEvent(new Event("change"));
   document.getElementById("rf-type").dispatchEvent(new Event("change"));
   (r.sessions || []).forEach(i => {
     const cb = document.querySelector(`.rf-sess-cb[value="${i}"]`);
