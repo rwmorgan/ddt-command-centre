@@ -324,6 +324,16 @@ th.sortable:hover { color: var(--accent); }
 .chip.chip-active { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .chip.chip-clear { background: transparent; border-style: dashed; color: var(--muted); }
 
+/* ---------- relief entries still missing cover ---------- */
+/* Deliberately loud: the whole point is catching your eye when scanning
+   the log for what you still have to sort out. */
+.item.relief-gap {
+  border-color: var(--flag);
+  border-left-width: 3px;
+  background: var(--flag-soft);
+}
+.item.relief-gap .badge-flag .mini-icon { stroke: var(--flag); }
+
 /* ---------- dashboard "needs attention" panel ---------- */
 .attention-card { border-color: var(--flag); border-left-width: 3px; }
 .attention-card .badge-flag { margin-left: 6px; vertical-align: 2px; }

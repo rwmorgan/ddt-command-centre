@@ -622,6 +622,25 @@ function showTab(id){
 /* ---------------------------------------------------------------------- */
 /* DASHBOARD                                                              */
 /* ---------------------------------------------------------------------- */
+/** Is this absence actually covered? "none" = nobody assigned at all,
+ * "partial" = split coverage that leaves some sessions with no one, and
+ * "covered" = sorted. Single source of truth so the relief log's
+ * highlighting and the dashboard's attention panel can never disagree. */
+function reliefCoverageStatus(r){
+  const groups = relieverGroupsFor(r);
+  if(!groups.length){
+    return { status: "none", missing: r.type === "sessions" ? (r.sessions || []) : [] };
+  }
+  if(r.type === "sessions" && r.relievers && r.relievers.length){
+    const covered = new Set();
+    r.relievers.forEach(g => (g.sessions || []).forEach(i => covered.add(i)));
+    const missing = (r.sessions || []).filter(i => !covered.has(i));
+    if(missing.length) return { status: "partial", missing };
+  }
+  return { status: "covered", missing: [] };
+}
+function reliefHasGap(r){ return reliefCoverageStatus(r).status !== "covered"; }
+
 /** Things that look like they've been forgotten -- derived entirely from
  * data already in state, no guessing and no AI. Each item says what's
  * wrong, how urgent it is, and which tab fixes it. Returns [] when there's
@@ -644,9 +663,9 @@ function collectAttentionItems(){
     .forEach(r => {
       const isToday = r.date === today;
       const when = isToday ? "today" : fmtDateShort(r.date);
-      const groups = relieverGroupsFor(r);
+      const cover = reliefCoverageStatus(r);
 
-      if(!groups.length){
+      if(cover.status === "none"){
         items.push({
           key: `relief-none:${r.id}`,
           severity: isToday ? 0 : 2,
@@ -658,21 +677,16 @@ function collectAttentionItems(){
       }
 
       // Split coverage can leave individual sessions quietly uncovered.
-      if(r.type === "sessions" && r.relievers && r.relievers.length){
-        const covered = new Set();
-        r.relievers.forEach(g => (g.sessions || []).forEach(i => covered.add(i)));
-        const missing = (r.sessions || []).filter(i => !covered.has(i));
-        if(missing.length){
-          items.push({
-            // Which sessions are missing is part of the key -- covering one
-            // of them changes the situation, so it should surface again.
-            key: `relief-partial:${r.id}:${missing.slice().sort((a,b)=>a-b).join(",")}`,
-            severity: isToday ? 1 : 3,
-            title: `${r.absentStaffName} is only partly covered`,
-            detail: `${when} · no relief for ${sessionLabelList(missing)}`,
-            tab: "relief",
-          });
-        }
+      if(cover.status === "partial"){
+        items.push({
+          // Which sessions are missing is part of the key -- covering one
+          // of them changes the situation, so it should surface again.
+          key: `relief-partial:${r.id}:${cover.missing.slice().sort((a,b)=>a-b).join(",")}`,
+          severity: isToday ? 1 : 3,
+          title: `${r.absentStaffName} is only partly covered`,
+          detail: `${when} · no relief for ${sessionLabelList(cover.missing)}`,
+          tab: "relief",
+        });
       }
     });
 
@@ -1338,6 +1352,7 @@ function renderRelief(){
       <div class="card-head">
         <h2>Relief log</h2>
         <div class="row" style="gap:8px;">
+          <button class="btn btn-sm" id="reliefGapsToggle">${icon("alert")} <span id="reliefGapsLabel"></span></button>
           <button class="btn btn-sm" id="printTodayBtn">${icon("print")} Print today's coverage</button>
           <button class="btn btn-sm" id="printWeekBtn">${icon("print")} Print week's coverage</button>
           <button class="btn btn-sm" id="exportReliefCsvBtn">${icon("export")} Export CSV</button>
@@ -1360,6 +1375,10 @@ function renderRelief(){
     </div>
   `;
 
+  document.getElementById("reliefGapsToggle").addEventListener("click", () => {
+    reliefGapsOnly = !reliefGapsOnly;
+    renderReliefLog();
+  });
   document.getElementById("printTodayBtn").addEventListener("click", printTodaysCoverage);
   document.getElementById("printWeekBtn").addEventListener("click", printWeekCoverage);
   renderReliefStats();
@@ -1879,6 +1898,8 @@ function renderSubjectChips(container, tags, selectedSet, onChange){
 /** The relief log entries currently matching the search text + date-range
  * filters (if any active) -- shared by the on-screen log list and CSV
  * export, so "export what's shown" genuinely exports what's shown. */
+let reliefGapsOnly = false; // "Needs relief" toggle above the log
+
 function filteredReliefEntries(){
   const f = (document.getElementById("reliefSearch")?.value || "").trim().toLowerCase();
   const from = document.getElementById("reliefFromDate")?.value || "";
@@ -1887,16 +1908,30 @@ function filteredReliefEntries(){
   if(f) entries = entries.filter(r => `${r.absentStaffName} ${allRelieverNames(r).join(" ")} ${r.reason} ${r.notes}`.toLowerCase().includes(f));
   if(from) entries = entries.filter(r => r.date >= from);
   if(to) entries = entries.filter(r => r.date <= to);
+  if(reliefGapsOnly) entries = entries.filter(reliefHasGap);
   return entries;
 }
 
 function renderReliefLog(){
   const box = document.getElementById("reliefLog");
+
+  // Count gaps across the whole log, not the filtered view -- otherwise
+  // switching the toggle on would make its own count read 0.
+  const gapCount = state.relief.log.filter(reliefHasGap).length;
+  const toggle = document.getElementById("reliefGapsToggle");
+  const toggleLabel = document.getElementById("reliefGapsLabel");
+  if(toggle && toggleLabel){
+    toggle.style.display = gapCount ? "" : "none";
+    toggle.classList.toggle("btn-primary", reliefGapsOnly);
+    toggleLabel.textContent = reliefGapsOnly ? `Showing ${gapCount} needing relief` : `${gapCount} need${gapCount === 1 ? "s" : ""} relief`;
+    if(!gapCount) reliefGapsOnly = false;
+  }
+
   const entries = filteredReliefEntries();
-  const filtersActive = !!(document.getElementById("reliefSearch")?.value.trim() || document.getElementById("reliefFromDate")?.value || document.getElementById("reliefToDate")?.value);
+  const filtersActive = !!(document.getElementById("reliefSearch")?.value.trim() || document.getElementById("reliefFromDate")?.value || document.getElementById("reliefToDate")?.value || reliefGapsOnly);
 
   if(!entries.length){
-    box.innerHTML = `<div class="empty-state">${icon("inbox")}<div>${filtersActive ? "No entries match your search or date filter." : "No relief entries yet. Log an absence above to get started."}</div></div>`;
+    box.innerHTML = `<div class="empty-state">${icon("inbox")}<div>${filtersActive ? "No entries match the filters you have on." : "No relief entries yet. Log an absence above to get started."}</div></div>`;
     return;
   }
 
@@ -1906,10 +1941,18 @@ function renderReliefLog(){
 
   box.innerHTML = `<div class="list">${sorted.map(r => {
     const sessLabel = r.type === "duty" ? "Duty" : r.type === "full-day" ? "Full day" : `S${(r.sessions||[]).map(i=>i+1).join(",")||"?"}`;
-    return `<div class="item">
+    const cover = reliefCoverageStatus(r);
+    // The session label is informational, so it stays muted -- that keeps
+    // the flag colour meaning "this still needs you" and nothing else.
+    const gapBadge = cover.status === "none"
+      ? `<span class="badge badge-flag">${icon("alert","mini-icon")}Needs relief</span>`
+      : cover.status === "partial"
+        ? `<span class="badge badge-flag">${icon("alert","mini-icon")}Needs relief: ${escapeHtml(sessionLabelList(cover.missing))}</span>`
+        : "";
+    return `<div class="item${cover.status !== "covered" ? " relief-gap" : ""}">
       <div class="item-main">
-        <div class="item-title">${escapeHtml(r.absentStaffName)} <span class="badge badge-flag">${escapeHtml(sessLabel)}</span></div>
-        <div class="item-sub mono">${fmtDateShort(r.date)} · ${reliefSummaryText(r) ? "Relief: " + escapeHtml(reliefSummaryText(r)) : "No relief assigned"} · ${escapeHtml(r.reason||"")}${allRelieverNames(r).length === 1 ? contactLinksHtml(allRelieverNames(r)[0]) : ""}</div>
+        <div class="item-title">${escapeHtml(r.absentStaffName)} <span class="badge badge-muted">${escapeHtml(sessLabel)}</span> ${gapBadge}</div>
+        <div class="item-sub mono">${fmtDateShort(r.date)} · ${reliefSummaryText(r) ? "Relief: " + escapeHtml(reliefSummaryText(r)) : "Nobody assigned yet"} · ${escapeHtml(r.reason||"")}${allRelieverNames(r).length === 1 ? contactLinksHtml(allRelieverNames(r)[0]) : ""}</div>
         ${r.attachments && r.attachments.length ? `<div class="item-sub">${attachmentLinksHtml(r.attachments)}</div>` : ""}
       </div>
       <div class="item-actions">
